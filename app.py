@@ -202,7 +202,6 @@ def create_sparrow_visualization(result, sheet_width_cm):
     ax.set_aspect('equal')
     ax.set_xlabel('폭 (cm)')
     ax.set_ylabel('길이 (cm)')
-    ax.set_title(f"Sparrow 네스팅 결과 - 효율: {result['efficiency']}%")
 
     plt.tight_layout()
     return fig
@@ -284,6 +283,25 @@ st.markdown("""
         width: 20px !important;
         height: 20px !important;
     }
+
+    /* 네스팅 결과 expander 제목 크기 25% 확대 */
+    div[data-testid="stExpander"] summary span {
+        font-size: 1.25em !important;
+        font-weight: bold !important;
+    }
+
+    /* 네스팅 결과 메트릭 값 크기 50% 축소 + 가운데 정렬 */
+    div[data-testid="stExpander"] div[data-testid="stMetric"] {
+        text-align: center !important;
+    }
+    div[data-testid="stExpander"] div[data-testid="stMetric"] label {
+        font-size: 0.7rem !important;
+        justify-content: center !important;
+    }
+    div[data-testid="stExpander"] div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        font-size: 1rem !important;
+        justify-content: center !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -302,6 +320,56 @@ except: pass
 # ==============================================================================
 # 2. 헬퍼 함수 및 유틸리티 (Helpers)
 # ==============================================================================
+
+def export_nesting_to_excel(nesting_results, timestamp):
+    """네스팅 결과를 엑셀로 내보내기"""
+    from io import BytesIO
+    import pandas as pd
+
+    output = BytesIO()
+
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # 마카 요약 시트
+        summary_data = []
+        for fabric, result in nesting_results.items():
+            if result.get('success'):
+                marker_qty = result.get('marker_quantity', 1)
+                yield_per_set = result.get('used_length_yd', 0) / marker_qty
+                summary_data.append({
+                    '원단': fabric,
+                    '벌수': marker_qty,
+                    '패턴수': f"{result.get('placed_count', 0)}/{result.get('total_count', 0)}",
+                    '원단폭(cm)': result.get('width_cm', 0),
+                    '마카길이(cm)': round(result.get('used_length_cm', 0), 1),
+                    '요척(YD)': round(yield_per_set, 2),
+                    '효율(%)': result.get('efficiency', 0),
+                    '작업일시': timestamp
+                })
+
+        if summary_data:
+            df_summary = pd.DataFrame(summary_data)
+            df_summary.to_excel(writer, sheet_name='마카요약', index=False)
+
+        # 배치 상세 시트 (원단별)
+        for fabric, result in nesting_results.items():
+            if result.get('success') and result.get('placements'):
+                placement_data = []
+                for i, p in enumerate(result['placements']):
+                    placement_data.append({
+                        '번호': i + 1,
+                        '패턴ID': p.get('pattern_id', ''),
+                        'X(cm)': round(p.get('x', 0), 1),
+                        'Y(cm)': round(p.get('y', 0), 1),
+                        '회전(°)': p.get('rotation', 0)
+                    })
+                if placement_data:
+                    df_placement = pd.DataFrame(placement_data)
+                    sheet_name = f"{fabric[:10]}_배치"  # 시트명 31자 제한
+                    df_placement.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    output.seek(0)
+    return output.getvalue()
+
 
 def get_fabric_color_hex(fabric_name):
     """원단 이름에 따른 색상 코드를 반환합니다."""
@@ -1222,7 +1290,17 @@ if uploaded_file is not None:
                         label_visibility="collapsed"
                     )
 
-            if st.button("🚀 네스팅 실행", use_container_width=True, type="primary"):
+            # 네스팅 실행 버튼 + 실행시간 표시
+            btn_col, time_col = st.columns([4, 1])
+            with btn_col:
+                run_nesting = st.button("🚀 네스팅 실행", use_container_width=True, type="primary")
+            with time_col:
+                if 'nesting_elapsed' in st.session_state:
+                    st.markdown(f"<p style='text-align:center; margin-top:5px;'>⏱️ {st.session_state.nesting_elapsed:.1f}초</p>", unsafe_allow_html=True)
+
+            if run_nesting:
+                import time
+                start_time = time.time()
                 spinner_msg = "🐦 Sparrow 최적화 중..." if use_sparrow else "원단별 네스팅 계산 중..."
                 with st.spinner(spinner_msg):
                     try:
@@ -1284,8 +1362,12 @@ if uploaded_file is not None:
                             result['marker_quantity'] = fabric_marker_qty
                             nesting_results[fabric] = result
 
-                        # 결과 저장
+                        # 결과 저장 (작업일시 + 실행시간 추가)
+                        from datetime import datetime
+                        st.session_state.nesting_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        st.session_state.nesting_elapsed = time.time() - start_time
                         st.session_state.nesting_results = nesting_results
+                        st.rerun()
 
                     except Exception as e:
                         st.error(f"네스팅 오류: {str(e)}")
@@ -1300,18 +1382,18 @@ if uploaded_file is not None:
                     color = get_fabric_color_hex(fabric)
 
                     marker_qty = result.get('marker_quantity', 1)
-                    with st.expander(f"📦 {fabric} 네스팅 결과 ({marker_qty}벌)", expanded=True):
+                    timestamp = st.session_state.get('nesting_timestamp', '')
+                    with st.expander(f"📦 {fabric} ({marker_qty}벌) - {timestamp}", expanded=True):
                         if result['success']:
-                            # 결과 메트릭
-                            m1, m2, m3, m4 = st.columns(4)
-                            m1.metric("배치 패턴", f"{result['placed_count']}/{result['total_count']}")
-                            m2.metric("필요 길이", f"{result['used_length_cm']:.1f} cm")
-                            m3.metric("필요 요척", f"{result['used_length_yd']:.2f} YD")
-                            m4.metric("효율", f"{result['efficiency']}%")
-
-                            # Sparrow 정보 표시
-                            if result.get('sparrow_mode'):
-                                st.caption(f"🐦 Sparrow 최적화 완료")
+                            # 결과 메트릭 (5열: 패턴수, 원단폭, 마카길이, 요척, 효율)
+                            m1, m2, m3, m4, m5 = st.columns([1, 1, 1.2, 1, 0.8])
+                            m1.metric("패턴수", f"{result['placed_count']}/{result['total_count']}")
+                            m2.metric("원단폭", f"{result['width_cm']:.0f} cm")
+                            m3.metric("마카길이", f"{result['used_length_cm']:.1f} cm")
+                            # 요척 = 마카길이(YD) / 벌수
+                            yield_per_set = result['used_length_yd'] / marker_qty
+                            m4.metric("요척", f"{yield_per_set:.2f} YD")
+                            m5.metric("효율", f"{result['efficiency']}%")
 
                             # 시각화
                             try:
@@ -1326,6 +1408,19 @@ if uploaded_file is not None:
                                 st.warning(f"시각화 오류: {str(e)}")
                         else:
                             st.warning(f"{fabric}: 패턴을 배치할 수 없습니다.")
+
+                # 네스팅 결과 엑셀 내보내기
+                st.markdown("---")
+                excel_data = export_nesting_to_excel(results, st.session_state.get('nesting_timestamp', ''))
+                if excel_data:
+                    timestamp_safe = st.session_state.get('nesting_timestamp', '').replace(':', '-').replace(' ', '_')
+                    st.download_button(
+                        label="📥 네스팅 결과 엑셀 다운로드",
+                        data=excel_data,
+                        file_name=f"네스팅결과_{timestamp_safe}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
 
     else:
         st.info("💡 DXF 파일을 업로드하면 패턴 분석이 시작됩니다.")
