@@ -1,0 +1,8 @@
+streamlit>=1.35.0
+ezdxf>=1.1.0
+shapely>=2.0.0
+matplotlib>=3.7.0
+plotly>=5.18.0
+pandas>=2.0.0
+openpyxl  # (추후 엑셀 다운로드를 위해 미리 추가 추천)
+xlsxwriter # (추후 엑셀 다운로드를 위해 미리 추가 추천)
