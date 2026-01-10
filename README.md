@@ -66,3 +66,28 @@ auto-yield/
 
 - [Sparrow](https://github.com/JeroenGar/sparrow) - State-of-the-art 2D 네스팅 알고리즘
 - [spyrrow](https://github.com/PaulDL-RS/spyrrow) - Sparrow Python 래퍼
+
+## 라이선스
+
+이 프로젝트는 다음 오픈소스 라이브러리를 사용합니다:
+
+### Sparrow / spyrrow
+- **Sparrow**: Copyright (c) Jeroen Gars - [MIT License](https://github.com/JeroenGar/sparrow/blob/main/LICENSE)
+- **spyrrow**: Copyright (c) PaulDL-RS - [MIT License](https://github.com/PaulDL-RS/spyrrow/blob/main/LICENSE.txt)
+
+MIT License 전문:
+```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+```
