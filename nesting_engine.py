@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-네스팅 엔진 모듈 (NFP 개선 버전)
+네스팅 엔진 모듈 (전문가 마카 전략 버전)
+- 전문가 마카 배치 전략: 4코너 우선 배치 + 가운데 채우기
 - NFP(No-Fit Polygon) 기반 2D 패턴 네스팅
 - Python 3 + Shapely + pyclipper
-- NFP 경로 기반 최적 배치 알고리즘
 """
 
 import pyclipper
@@ -18,20 +18,308 @@ import math
 # pyclipper 스케일 (정수 변환용)
 CLIPPER_SCALE = 1000
 
+import random
+
+
+class GeneticNesting:
+    """
+    유전 알고리즘 기반 네스팅 최적화
+    - 염색체: [패턴순서, 회전각도] 조합
+    - 적합도: 효율(%) - 높을수록 좋음
+    - 목표: 85%+ 효율 달성
+    """
+
+    def __init__(self, engine, population_size=30, generations=50, mutation_rate=0.15):
+        """
+        Args:
+            engine: NestingEngine 인스턴스
+            population_size: 개체군 크기
+            generations: 세대 수
+            mutation_rate: 돌연변이 확률
+        """
+        self.engine = engine
+        self.population_size = population_size
+        self.generations = generations
+        self.mutation_rate = mutation_rate
+        self.rotations = [0, 180]  # 허용 회전각
+        self.best_solution = None
+        self.best_fitness = 0
+        self.generation_stats = []
+        self.fitness_cache = {}  # 캐시로 중복 평가 방지
+
+    def create_chromosome(self):
+        """
+        염색체 생성: [패턴인덱스 순서] + [각 패턴의 회전각]
+        """
+        n = len(self.engine.patterns)
+        order = list(range(n))
+        random.shuffle(order)
+        rotations = [random.choice(self.rotations) for _ in range(n)]
+        return {'order': order, 'rotations': rotations}
+
+    def _chromosome_key(self, chromosome):
+        """염색체를 캐시 키로 변환"""
+        return (tuple(chromosome['order']), tuple(chromosome['rotations']))
+
+    def evaluate_fitness(self, chromosome):
+        """
+        적합도 평가: 염색체로 배치 실행 후 효율 반환 (캐시 사용)
+        """
+        # 캐시 확인
+        key = self._chromosome_key(chromosome)
+        if key in self.fitness_cache:
+            return self.fitness_cache[key]
+
+        # 엔진 상태 초기화
+        self.engine._reset_placement()
+        for p in self.engine.patterns:
+            p['placed'] = False
+
+        # 염색체 순서대로 패턴 배치 (빠른 배치 사용)
+        for i, pattern_idx in enumerate(chromosome['order']):
+            pattern = self.engine.patterns[pattern_idx]
+            rotation = chromosome['rotations'][i]
+
+            rotated_coords = self.engine._rotate_polygon(pattern['coords'], rotation)
+            position = self._fast_find_position(rotated_coords)
+
+            if position:
+                final_coords = self.engine._translate_polygon(rotated_coords, position[0], position[1])
+                self.engine._place_pattern(pattern, position[0], position[1], rotation, final_coords)
+
+        # 효율 계산
+        result = self.engine._calculate_result()
+        fitness = result['efficiency'] if result['success'] else 0
+
+        # 캐시 저장
+        self.fitness_cache[key] = fitness
+        return fitness
+
+    def _fast_find_position(self, pattern_coords):
+        """빠른 위치 찾기 (GA 평가용 - 간소화)"""
+        bounds = self.engine._get_bounds(pattern_coords)
+        pattern_width = bounds['width']
+        pattern_height = bounds['height']
+
+        if not self.engine._placed_polygons:
+            return (0, 0)
+
+        max_y = max(b[3] for b in self.engine._placed_bounds)
+        step = 10  # 더 큰 스텝으로 빠르게
+
+        # 우선 위치만 체크
+        for pb in self.engine._placed_bounds:
+            # 오른쪽
+            x = pb[2] + self.engine.spacing
+            if x + pattern_width <= self.engine.sheet_width:
+                test = self.engine._translate_polygon(pattern_coords, x, pb[1])
+                if self.engine._is_inside_sheet(test) and not self.engine._check_collision_optimized(test):
+                    return (x, pb[1])
+            # 위쪽
+            y = pb[3] + self.engine.spacing
+            test = self.engine._translate_polygon(pattern_coords, 0, y)
+            if self.engine._is_inside_sheet(test) and not self.engine._check_collision_optimized(test):
+                return (0, y)
+
+        # 그리드 탐색
+        for y in range(0, int(max_y + pattern_height), step):
+            for x in range(0, int(self.engine.sheet_width - pattern_width), step):
+                test = self.engine._translate_polygon(pattern_coords, x, y)
+                if self.engine._is_inside_sheet(test) and not self.engine._check_collision_optimized(test):
+                    return (x, y)
+
+        return (0, int(max_y + self.engine.spacing))
+
+    def select_parents(self, population, fitness_scores):
+        """
+        토너먼트 선택: 3개 중 최고 선택
+        """
+        tournament_size = 3
+        parents = []
+
+        for _ in range(2):
+            candidates = random.sample(list(zip(population, fitness_scores)), tournament_size)
+            winner = max(candidates, key=lambda x: x[1])
+            parents.append(winner[0])
+
+        return parents
+
+    def crossover(self, parent1, parent2):
+        """
+        순서 교차 (Order Crossover - OX)
+        """
+        n = len(parent1['order'])
+        child_order = [-1] * n
+
+        # 랜덤 구간 선택
+        start, end = sorted(random.sample(range(n), 2))
+
+        # 부모1에서 구간 복사
+        child_order[start:end+1] = parent1['order'][start:end+1]
+        copied = set(child_order[start:end+1])
+
+        # 부모2에서 나머지 채우기
+        p2_idx = 0
+        for i in range(n):
+            if child_order[i] == -1:
+                while parent2['order'][p2_idx] in copied:
+                    p2_idx += 1
+                child_order[i] = parent2['order'][p2_idx]
+                copied.add(parent2['order'][p2_idx])
+                p2_idx += 1
+
+        # 회전은 랜덤하게 부모에서 선택
+        child_rotations = []
+        for i in range(n):
+            if random.random() < 0.5:
+                child_rotations.append(parent1['rotations'][i])
+            else:
+                child_rotations.append(parent2['rotations'][i])
+
+        return {'order': child_order, 'rotations': child_rotations}
+
+    def mutate(self, chromosome):
+        """
+        돌연변이: 순서 스왑 또는 회전 변경
+        """
+        n = len(chromosome['order'])
+
+        # 순서 스왑 (50% 확률)
+        if random.random() < 0.5:
+            i, j = random.sample(range(n), 2)
+            chromosome['order'][i], chromosome['order'][j] = \
+                chromosome['order'][j], chromosome['order'][i]
+
+        # 회전 변경 (50% 확률)
+        if random.random() < 0.5:
+            i = random.randint(0, n-1)
+            chromosome['rotations'][i] = random.choice(self.rotations)
+
+        return chromosome
+
+    def run(self, callback=None):
+        """
+        유전 알고리즘 실행
+
+        Args:
+            callback: 세대별 콜백 함수 (generation, best_fitness)
+
+        Returns:
+            최적 결과
+        """
+        n = len(self.engine.patterns)
+
+        # 초기 개체군 생성 (휴리스틱 시드 포함)
+        population = []
+
+        # 1. 면적 내림차순 (기존 휴리스틱)
+        area_order = sorted(range(n), key=lambda i: self.engine.patterns[i]['area'], reverse=True)
+        population.append({'order': area_order, 'rotations': [0]*n})
+        population.append({'order': area_order, 'rotations': [180]*n})
+        population.append({'order': area_order, 'rotations': [0 if i%2==0 else 180 for i in range(n)]})
+
+        # 2. 높이 내림차순
+        height_order = sorted(range(n), key=lambda i: self.engine._get_bounds(self.engine.patterns[i]['coords'])['height'], reverse=True)
+        population.append({'order': height_order, 'rotations': [0]*n})
+        population.append({'order': height_order, 'rotations': [180]*n})
+
+        # 3. 폭 내림차순
+        width_order = sorted(range(n), key=lambda i: self.engine._get_bounds(self.engine.patterns[i]['coords'])['width'], reverse=True)
+        population.append({'order': width_order, 'rotations': [0]*n})
+
+        # 4. 나머지는 랜덤
+        while len(population) < self.population_size:
+            population.append(self.create_chromosome())
+
+        for gen in range(self.generations):
+            # 적합도 평가
+            fitness_scores = [self.evaluate_fitness(chrom) for chrom in population]
+
+            # 최고 개체 저장
+            max_idx = fitness_scores.index(max(fitness_scores))
+            if fitness_scores[max_idx] > self.best_fitness:
+                self.best_fitness = fitness_scores[max_idx]
+                self.best_solution = population[max_idx].copy()
+
+            # 통계 저장
+            avg_fitness = sum(fitness_scores) / len(fitness_scores)
+            self.generation_stats.append({
+                'generation': gen,
+                'best': max(fitness_scores),
+                'avg': avg_fitness,
+                'worst': min(fitness_scores)
+            })
+
+            # 콜백
+            if callback:
+                callback(gen, self.best_fitness)
+
+            # 조기 종료: 목표 효율 달성
+            if self.best_fitness >= 88:
+                break
+
+            # 새로운 세대 생성
+            new_population = []
+
+            # 엘리트 보존 (상위 2개)
+            sorted_pop = sorted(zip(population, fitness_scores), key=lambda x: x[1], reverse=True)
+            new_population.append(sorted_pop[0][0])
+            new_population.append(sorted_pop[1][0])
+
+            # 나머지는 교차 + 돌연변이
+            while len(new_population) < self.population_size:
+                parents = self.select_parents(population, fitness_scores)
+                child = self.crossover(parents[0], parents[1])
+
+                if random.random() < self.mutation_rate:
+                    child = self.mutate(child)
+
+                new_population.append(child)
+
+            population = new_population
+
+        # 최종 결과 반환
+        return self.get_best_result()
+
+    def get_best_result(self):
+        """최적 솔루션으로 배치 실행 후 결과 반환"""
+        if not self.best_solution:
+            return None
+
+        # 최적 솔루션 적용
+        self.engine._reset_placement()
+        for p in self.engine.patterns:
+            p['placed'] = False
+
+        for i, pattern_idx in enumerate(self.best_solution['order']):
+            pattern = self.engine.patterns[pattern_idx]
+            rotation = self.best_solution['rotations'][i]
+
+            rotated_coords = self.engine._rotate_polygon(pattern['coords'], rotation)
+            position = self.engine._find_position_optimized(rotated_coords)
+
+            if position:
+                final_coords = self.engine._translate_polygon(rotated_coords, position[0], position[1])
+                self.engine._place_pattern(pattern, position[0], position[1], rotation, final_coords)
+
+        return self.engine._calculate_result()
+
 
 class NestingEngine:
-    """NFP 기반 네스팅 엔진 (NFP 개선 버전)"""
+    """전문가 마카 전략 기반 네스팅 엔진"""
 
-    def __init__(self, sheet_width, sheet_height=10000, spacing=5):
+    def __init__(self, sheet_width, sheet_height=10000, spacing=5, target_efficiency=80):
         """
         Args:
             sheet_width: 원단 폭 (mm)
             sheet_height: 원단 길이 (mm), 기본값 10000 (무한대 가정)
             spacing: 패턴 간 간격 (mm)
+            target_efficiency: 목표 효율 (%) - 기본 80%
         """
         self.sheet_width = sheet_width
         self.sheet_height = sheet_height
         self.spacing = spacing
+        self.target_efficiency = target_efficiency
         self.patterns = []  # 배치할 패턴들
         self.placements = []  # 배치 결과
         self.nfp_cache = {}  # NFP 캐시
@@ -42,8 +330,11 @@ class NestingEngine:
         self._placed_coords = []    # 원본 좌표들
         self._spatial_index = None  # STRtree 공간 인덱스
 
-        # NFP 사용 여부 (현재 Grid 방식이 더 효율적)
-        self.use_nfp = False
+        # NFP 사용 여부 (곡선 패턴 인터락킹에 효과적)
+        self.use_nfp = True
+
+        # 전문가 전략 사용 여부
+        self.use_expert_strategy = True
 
     def add_pattern(self, polygon, quantity=1, pattern_id=None):
         """
@@ -87,40 +378,71 @@ class NestingEngine:
             pattern_id = f"{row.구분}_{i}" if hasattr(row, '구분') else f"pattern_{i}"
             self.add_pattern(poly, quantity=quantity, pattern_id=pattern_id)
 
-    def run(self, rotations=[0], iterations=3):
+    # ==================== 전문가 마카 전략 함수 ====================
+
+    def _classify_pattern(self, pattern_id):
         """
-        네스팅 실행 (NFP 개선 버전)
-
-        Args:
-            rotations: 허용 회전 각도 리스트 (예: [0, 90, 180, 270])
-            iterations: 최적화 반복 횟수
-
-        Returns:
-            dict: 네스팅 결과
+        패턴 이름으로 유형 분류 (전문가 마카 분석 기반)
+        Returns: 'body', 'sleeve', 'strip', 'pants', 'other'
         """
-        # 면적 기준 내림차순 정렬 (큰 패턴 먼저 배치)
-        self.patterns.sort(key=lambda p: p['area'], reverse=True)
+        name = pattern_id.lower() if pattern_id else ''
 
-        # 배치 초기화
-        self.placements = []
-        self._placed_polygons = []
-        self._placed_bounds = []
-        self._placed_coords = []  # NFP 계산용 좌표 저장
-        self._spatial_index = None
-        self.nfp_cache = {}  # NFP 캐시 초기화
+        # 몸판류
+        if any(k in name for k in ['앞판', '뒤판', 'front', 'back', 'body', '몸판']):
+            return 'body'
 
-        for pattern in self.patterns:
+        # 소매류
+        if any(k in name for k in ['소매', 'sleeve', '袖']):
+            return 'sleeve'
+
+        # 스트립류 (밴드, 바인딩, 카라 등)
+        if any(k in name for k in ['밴드', 'band', '바인딩', 'binding', '카라', 'collar',
+                                    '목', 'neck', '허리', 'waist', 'rib', '립']):
+            return 'strip'
+
+        # 바지류
+        if any(k in name for k in ['pants', '바지', '팬츠', 'trouser']):
+            return 'pants'
+
+        return 'other'
+
+    def _group_patterns_by_type(self):
+        """패턴을 유형별로 그룹화"""
+        groups = {'body': [], 'sleeve': [], 'strip': [], 'pants': [], 'other': []}
+
+        for i, p in enumerate(self.patterns):
+            ptype = self._classify_pattern(p['id'])
+            groups[ptype].append(i)
+
+        return groups
+
+    def _arrange_sleeves_zigzag(self, sleeve_indices, rotations):
+        """
+        소매 패턴을 지그재그로 배열 (전문가 마카 핵심 전략)
+        ↗↘↗↘ 패턴으로 배치하여 곡선 인터락킹
+        """
+        if not sleeve_indices:
+            return
+
+        placed_count = 0
+        for i, idx in enumerate(sleeve_indices):
+            pattern = self.patterns[idx]
+            if pattern['placed']:
+                continue
+
+            # 짝수: 0도, 홀수: 180도 (지그재그)
+            preferred_rotation = 0 if (placed_count % 2 == 0) else 180
+
             best_position = None
             best_y = float('inf')
-            best_rotation = 0
+            best_rotation = preferred_rotation
             best_coords = None
 
-            # 각 회전 각도에 대해 최적 위치 찾기
-            for rotation in rotations:
-                rotated_coords = self._rotate_polygon(pattern['coords'], rotation)
+            # 선호 회전 먼저 시도
+            rotation_order = [preferred_rotation] + [r for r in rotations if r != preferred_rotation]
 
-                # 간격은 충돌 체크에서 적용 (패턴 자체는 원본 사용)
-                # 가능한 배치 위치 찾기
+            for rotation in rotation_order:
+                rotated_coords = self._rotate_polygon(pattern['coords'], rotation)
                 if self.use_nfp:
                     position = self._find_position_nfp(rotated_coords)
                 else:
@@ -133,40 +455,359 @@ class NestingEngine:
                     best_coords = rotated_coords
 
             if best_position:
-                # 배치 적용
-                pattern['x'] = best_position[0]
-                pattern['y'] = best_position[1]
-                pattern['rotation'] = best_rotation
-                pattern['placed'] = True
+                final_coords = self._translate_polygon(best_coords, best_position[0], best_position[1])
+                self._place_pattern(pattern, best_position[0], best_position[1], best_rotation, final_coords)
+                placed_count += 1
 
-                # 배치된 폴리곤 추가
-                final_coords = self._rotate_polygon(pattern['coords'], best_rotation)
-                final_coords = self._translate_polygon(final_coords, best_position[0], best_position[1])
+    def _calculate_target_length(self, total_area):
+        """목표 효율에서 필요 길이 계산"""
+        # 효율 = 패턴면적 / (폭 * 길이) * 100
+        # 길이 = 패턴면적 / (폭 * 효율/100)
+        target_length = total_area / (self.sheet_width * self.target_efficiency / 100)
+        return target_length
 
-                # Shapely 폴리곤 생성 및 캐시
-                placed_poly = ShapelyPolygon(final_coords)
-                if not placed_poly.is_valid:
-                    placed_poly = placed_poly.buffer(0)
-                self._placed_polygons.append(placed_poly)
-                self._placed_bounds.append(placed_poly.bounds)
-                self._placed_coords.append(final_coords)  # NFP 계산용
+    def _get_corner_score(self, coords, corner_type):
+        """
+        코너 적합도 점수 계산 (0~100)
+        - corner_type: 'BL'(좌하), 'BR'(우하), 'TL'(좌상), 'TR'(우상)
+        - 직선변이 코너 방향에 맞으면 높은 점수
+        """
+        bounds = self._get_bounds(coords)
+        poly = ShapelyPolygon(coords)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
 
-                # 공간 인덱스 재구축 (5개마다)
-                if len(self._placed_polygons) % 5 == 0:
-                    self._spatial_index = STRtree(self._placed_polygons)
+        score = 0
 
-                self.placements.append({
-                    'id': pattern['id'],
-                    'x': best_position[0],
-                    'y': best_position[1],
-                    'rotation': best_rotation,
-                    'coords': final_coords
-                })
+        # 바운딩박스 대비 면적 비율 (직사각형에 가까울수록 코너에 적합)
+        bbox_area = bounds['width'] * bounds['height']
+        fill_ratio = poly.area / bbox_area if bbox_area > 0 else 0
+        score += fill_ratio * 40  # 최대 40점
+
+        # 변 직선성 체크 - 해당 코너 방향의 변이 직선인지
+        coords_list = list(coords)
+        n = len(coords_list)
+
+        for i in range(n):
+            p1 = coords_list[i]
+            p2 = coords_list[(i + 1) % n]
+
+            edge_len = math.sqrt((p2[0]-p1[0])**2 + (p2[1]-p1[1])**2)
+            if edge_len < 50:  # 5cm 미만 변은 무시
+                continue
+
+            # 수평 직선변 (Y 변화 거의 없음)
+            if abs(p2[1] - p1[1]) < 2:
+                if corner_type in ['BL', 'BR'] and min(p1[1], p2[1]) < bounds['min_y'] + 10:
+                    score += 15  # 하단 수평변
+                elif corner_type in ['TL', 'TR'] and max(p1[1], p2[1]) > bounds['max_y'] - 10:
+                    score += 15  # 상단 수평변
+
+            # 수직 직선변 (X 변화 거의 없음)
+            if abs(p2[0] - p1[0]) < 2:
+                if corner_type in ['BL', 'TL'] and min(p1[0], p2[0]) < bounds['min_x'] + 10:
+                    score += 15  # 좌측 수직변
+                elif corner_type in ['BR', 'TR'] and max(p1[0], p2[0]) > bounds['max_x'] - 10:
+                    score += 15  # 우측 수직변
+
+        # 크기 보너스 (큰 패턴이 코너에 더 적합)
+        area_bonus = min(30, poly.area / 10000)  # 최대 30점
+        score += area_bonus
+
+        return min(100, score)
+
+    def _find_best_corner_patterns(self, patterns, target_length):
+        """
+        4코너에 가장 적합한 패턴 선택
+        Returns: {corner_type: (pattern_index, rotation, score)}
+        """
+        corners = {
+            'BL': {'x': 0, 'y': 0},                                    # 좌하
+            'BR': {'x': self.sheet_width, 'y': 0},                     # 우하
+            'TL': {'x': 0, 'y': target_length},                        # 좌상
+            'TR': {'x': self.sheet_width, 'y': target_length}          # 우상
+        }
+
+        best_patterns = {}
+        used_indices = set()
+
+        # 면적순 정렬된 패턴 인덱스
+        sorted_indices = sorted(range(len(patterns)),
+                                key=lambda i: patterns[i]['area'], reverse=True)
+
+        # 각 코너별로 최적 패턴 찾기 (큰 패턴 우선)
+        for corner_type in ['BL', 'BR', 'TL', 'TR']:
+            best_score = -1
+            best_idx = -1
+            best_rot = 0
+
+            # 상위 50% 큰 패턴만 코너 후보로
+            candidate_count = max(4, len(sorted_indices) // 2)
+
+            for idx in sorted_indices[:candidate_count]:
+                if idx in used_indices:
+                    continue
+
+                pattern = patterns[idx]
+
+                # 0도와 180도 회전 모두 테스트
+                for rotation in [0, 180]:
+                    rotated = self._rotate_polygon(pattern['coords'], rotation)
+                    score = self._get_corner_score(rotated, corner_type)
+
+                    # 코너에 맞는지 크기 체크
+                    bounds = self._get_bounds(rotated)
+                    if corner_type in ['BR', 'TR'] and bounds['width'] > self.sheet_width * 0.7:
+                        continue  # 우측 코너인데 폭이 70% 넘으면 제외
+
+                    if score > best_score:
+                        best_score = score
+                        best_idx = idx
+                        best_rot = rotation
+
+            if best_idx >= 0 and best_score > 30:  # 최소 30점 이상
+                best_patterns[corner_type] = {
+                    'index': best_idx,
+                    'rotation': best_rot,
+                    'score': best_score
+                }
+                used_indices.add(best_idx)
+
+        return best_patterns
+
+    def _place_corner_pattern(self, pattern, corner_type, target_length, rotation):
+        """코너에 패턴 배치"""
+        coords = self._rotate_polygon(pattern['coords'], rotation)
+        bounds = self._get_bounds(coords)
+
+        # 코너별 배치 위치 계산
+        if corner_type == 'BL':  # 좌하
+            x, y = 0, 0
+        elif corner_type == 'BR':  # 우하
+            x = self.sheet_width - bounds['width']
+            y = 0
+        elif corner_type == 'TL':  # 좌상
+            x = 0
+            y = target_length - bounds['height']
+        else:  # TR 우상
+            x = self.sheet_width - bounds['width']
+            y = target_length - bounds['height']
+
+        return x, y, coords
+
+    def run(self, rotations=[0, 180], iterations=3):
+        """
+        네스팅 실행 (다중 시도 최적화 버전)
+
+        Args:
+            rotations: 허용 회전 각도 리스트 (기본: [0, 180])
+            iterations: 최적화 반복 횟수
+
+        Returns:
+            dict: 네스팅 결과
+        """
+        if not self.patterns:
+            return self._calculate_result()
+
+        # 180도 회전 필수 포함
+        if 180 not in rotations:
+            rotations = list(rotations) + [180]
+
+        # 다중 정렬 기준으로 최적화 시도
+        sort_strategies = [
+            ('area', lambda p: p['area'], True),           # 면적 큰 순
+            ('height', lambda p: self._get_bounds(p['coords'])['height'], True),  # 높이 큰 순
+            ('width', lambda p: self._get_bounds(p['coords'])['width'], True),    # 폭 큰 순
+        ]
+
+        best_result = None
+        best_efficiency = 0
+
+        # Grid 방식과 NFP 방식 모두 시도
+        nfp_modes = [False, True] if self.use_nfp else [False]
+
+        for use_nfp in nfp_modes:
+            for name, sort_key, reverse in sort_strategies:
+                # 배치 초기화
+                self._reset_placement()
+                for p in self.patterns:
+                    p['placed'] = False
+
+                # 정렬 적용
+                self.patterns.sort(key=sort_key, reverse=reverse)
+
+                # 현재 NFP 모드 설정
+                current_nfp = self.use_nfp
+                self.use_nfp = use_nfp
+
+                # 전략 실행
+                if self.use_expert_strategy and len(self.patterns) >= 4:
+                    result = self._run_expert_strategy(rotations)
+                else:
+                    result = self._run_standard_strategy(rotations)
+
+                # NFP 모드 복원
+                self.use_nfp = current_nfp
+
+                # 최고 효율 결과 저장
+                if result['efficiency'] > best_efficiency:
+                    best_efficiency = result['efficiency']
+                    best_result = result
+
+        return best_result if best_result else self._calculate_result()
+
+    def _reset_placement(self):
+        """배치 상태 초기화"""
+        self.placements = []
+        self._placed_polygons = []
+        self._placed_bounds = []
+        self._placed_coords = []
+        self._spatial_index = None
+        self.nfp_cache = {}
+
+    def _run_expert_strategy(self, rotations):
+        """
+        전문가 마카 전략으로 네스팅 실행 (PDF 분석 기반)
+        1. 패턴 유형별 그룹화
+        2. 몸판을 양 끝에 배치
+        3. 소매는 지그재그 배열
+        4. 나머지 패턴 채우기
+        5. 스트립은 마지막에 빈틈 채움
+        """
+        # 1. 패턴 유형별 그룹화
+        groups = self._group_patterns_by_type()
+
+        # 2. 몸판(body) 먼저 배치 - 양 끝에
+        body_indices = groups['body']
+        body_indices.sort(key=lambda i: self.patterns[i]['area'], reverse=True)
+
+        for idx in body_indices:
+            pattern = self.patterns[idx]
+            if pattern['placed']:
+                continue
+            self._place_single_pattern(pattern, rotations)
+
+        # 3. 소매(sleeve) 지그재그 배열 - 핵심 전략!
+        sleeve_indices = groups['sleeve']
+        sleeve_indices.sort(key=lambda i: self.patterns[i]['area'], reverse=True)
+        self._arrange_sleeves_zigzag(sleeve_indices, rotations)
+
+        # 4. 바지/기타 패턴 배치
+        other_indices = groups['pants'] + groups['other']
+        other_indices.sort(key=lambda i: self.patterns[i]['area'], reverse=True)
+
+        for idx in other_indices:
+            pattern = self.patterns[idx]
+            if pattern['placed']:
+                continue
+            self._place_single_pattern(pattern, rotations)
+
+        # 5. 스트립(밴드, 카라 등)은 마지막에 빈틈 채우기
+        strip_indices = groups['strip']
+        strip_indices.sort(key=lambda i: self.patterns[i]['area'], reverse=True)
+
+        for idx in strip_indices:
+            pattern = self.patterns[idx]
+            if pattern['placed']:
+                continue
+            self._place_single_pattern(pattern, rotations)
 
         return self._calculate_result()
 
+    def _place_single_pattern(self, pattern, rotations):
+        """단일 패턴 최적 위치에 배치"""
+        if pattern['placed']:
+            return False
+
+        best_position = None
+        best_y = float('inf')
+        best_rotation = 0
+        best_coords = None
+
+        for rotation in rotations:
+            rotated_coords = self._rotate_polygon(pattern['coords'], rotation)
+            if self.use_nfp:
+                position = self._find_position_nfp(rotated_coords)
+            else:
+                position = self._find_position_optimized(rotated_coords)
+
+            if position and position[1] < best_y:
+                best_position = position
+                best_y = position[1]
+                best_rotation = rotation
+                best_coords = rotated_coords
+
+        if best_position:
+            final_coords = self._translate_polygon(best_coords, best_position[0], best_position[1])
+            self._place_pattern(pattern, best_position[0], best_position[1], best_rotation, final_coords)
+            return True
+        return False
+
+    def _run_standard_strategy(self, rotations):
+        """표준 Bottom-Left 전략"""
+        # 면적 기준 내림차순 정렬
+        self.patterns.sort(key=lambda p: p['area'], reverse=True)
+
+        for pattern in self.patterns:
+            best_position = None
+            best_y = float('inf')
+            best_rotation = 0
+            best_coords = None
+
+            for rotation in rotations:
+                rotated_coords = self._rotate_polygon(pattern['coords'], rotation)
+
+                if self.use_nfp:
+                    position = self._find_position_nfp(rotated_coords)
+                else:
+                    position = self._find_position_optimized(rotated_coords)
+
+                if position and position[1] < best_y:
+                    best_position = position
+                    best_y = position[1]
+                    best_rotation = rotation
+                    best_coords = rotated_coords
+
+            if best_position:
+                final_coords = self._translate_polygon(best_coords, best_position[0], best_position[1])
+                self._place_pattern(pattern, best_position[0], best_position[1], best_rotation, final_coords)
+
+        return self._calculate_result()
+
+    def _place_pattern(self, pattern, x, y, rotation, final_coords):
+        """패턴 배치 공통 함수"""
+        pattern['x'] = x
+        pattern['y'] = y
+        pattern['rotation'] = rotation
+        pattern['placed'] = True
+
+        placed_poly = ShapelyPolygon(final_coords)
+        if not placed_poly.is_valid:
+            placed_poly = placed_poly.buffer(0)
+
+        self._placed_polygons.append(placed_poly)
+        self._placed_bounds.append(placed_poly.bounds)
+        self._placed_coords.append(final_coords)
+
+        if len(self._placed_polygons) % 5 == 0:
+            self._spatial_index = STRtree(self._placed_polygons)
+
+        self.placements.append({
+            'id': pattern['id'],
+            'x': x,
+            'y': y,
+            'rotation': rotation,
+            'coords': final_coords
+        })
+
+    def _get_current_length(self):
+        """현재 사용된 길이 반환"""
+        if not self._placed_bounds:
+            return 0
+        return max(b[3] for b in self._placed_bounds)
+
     def _find_position_optimized(self, pattern_coords):
-        """최적화된 Bottom-Left 알고리즘 (적응형 스텝 + 우선 탐색)"""
+        """최적화된 Bottom-Left 알고리즘 (정밀 배치 버전)"""
         pattern_bounds = self._get_bounds(pattern_coords)
         pattern_width = pattern_bounds['width']
         pattern_height = pattern_bounds['height']
@@ -180,31 +821,59 @@ class NestingEngine:
         for bounds in self._placed_bounds:
             max_used_y = max(max_used_y, bounds[3])
 
-        # 1단계: 우선 탐색 위치 (인접 영역)
+        # spacing=0일 때 더 정밀한 탐색
+        step = 2 if self.spacing == 0 else 5
+
+        # 1단계: 우선 탐색 위치 (인접 영역 + 폴리곤 정점 기반)
         priority_positions = []
-        for placed_bounds in self._placed_bounds:
-            # 패턴 오른쪽
+
+        for i, placed_coords in enumerate(self._placed_coords):
+            placed_bounds = self._placed_bounds[i]
+
+            # 바운딩박스 기반 위치
             right_x = placed_bounds[2] + self.spacing
             if right_x + pattern_width <= self.sheet_width:
-                priority_positions.append((right_x, placed_bounds[1]))
-            # 패턴 위
-            top_y = placed_bounds[3] + self.spacing
-            priority_positions.append((0, top_y))
-            priority_positions.append((placed_bounds[0], top_y))
+                # 다양한 Y 오프셋으로 시도
+                for y_off in [0, -pattern_height/4, -pattern_height/2, pattern_height/4]:
+                    y_pos = placed_bounds[1] + y_off
+                    if y_pos >= 0:
+                        priority_positions.append((right_x, y_pos))
 
-        # 우선 위치 Y 기준 정렬
+            # 패턴 위쪽
+            top_y = placed_bounds[3] + self.spacing
+            for x_off in [0, pattern_width/4, pattern_width/2]:
+                priority_positions.append((placed_bounds[0] + x_off, top_y))
+            priority_positions.append((0, top_y))
+
+            # 폴리곤 정점 기반 위치 (더 정밀한 배치)
+            if self.spacing == 0:
+                for px, py in placed_coords:
+                    # 정점 오른쪽
+                    if px + pattern_width <= self.sheet_width:
+                        priority_positions.append((px, max(0, py - pattern_height)))
+                        priority_positions.append((px, py))
+                    # 정점 위쪽
+                    priority_positions.append((max(0, px - pattern_width), py))
+                    priority_positions.append((px, py))
+
+        # 시트 왼쪽 가장자리 위치 추가
+        for y in range(0, int(max_used_y + pattern_height), int(step * 5)):
+            priority_positions.append((0, y))
+
+        # 중복 제거 및 Y 기준 정렬
+        priority_positions = list(set((int(x), int(y)) for x, y in priority_positions if x >= 0 and y >= 0))
         priority_positions.sort(key=lambda p: (p[1], p[0]))
 
         # 우선 위치에서 빠르게 검색
         for x, y in priority_positions:
-            if x < 0 or y < 0:
-                continue
             test_coords = self._translate_polygon(pattern_coords, x, y)
             if self._is_inside_sheet(test_coords) and not self._check_collision_optimized(test_coords):
+                # spacing=0일 때 슬라이딩으로 빈틈 최소화
+                if self.spacing == 0:
+                    x, y = self._slide_to_touch(pattern_coords, x, y)
                 return (x, y)
 
-        # 2단계: 그리드 탐색 (5mm 스텝 - 높은 효율)
-        step = 5
+        # 2단계: 그리드 탐색
         search_height = max_used_y + pattern_height + self.spacing * 2
 
         y = 0
@@ -218,6 +887,9 @@ class NestingEngine:
                     continue
 
                 if not self._check_collision_optimized(test_coords):
+                    # spacing=0일 때 슬라이딩으로 빈틈 최소화
+                    if self.spacing == 0:
+                        x, y = self._slide_to_touch(pattern_coords, x, y)
                     return (x, y)
 
                 x += step
@@ -231,6 +903,27 @@ class NestingEngine:
                 return (x, new_y)
 
         return (0, new_y + int(pattern_height) + self.spacing)
+
+    def _slide_to_touch(self, pattern_coords, start_x, start_y):
+        """패턴을 왼쪽/아래로 밀어서 다른 패턴에 닿게 함"""
+        x, y = start_x, start_y
+        slide_step = 1  # 1mm 단위로 슬라이딩
+
+        # 아래로 슬라이딩
+        while y > 0:
+            test_coords = self._translate_polygon(pattern_coords, x, y - slide_step)
+            if not self._is_inside_sheet(test_coords) or self._check_collision_optimized(test_coords):
+                break
+            y -= slide_step
+
+        # 왼쪽으로 슬라이딩
+        while x > 0:
+            test_coords = self._translate_polygon(pattern_coords, x - slide_step, y)
+            if not self._is_inside_sheet(test_coords) or self._check_collision_optimized(test_coords):
+                break
+            x -= slide_step
+
+        return (x, y)
 
     def _check_collision_optimized(self, coords):
         """최적화된 충돌 체크 (바운딩박스 + 직접비교)"""
@@ -253,13 +946,19 @@ class NestingEngine:
                     test_bounds[1] - margin > placed_bounds[3]):
                     continue  # 바운딩박스 겹치지 않음
 
-                # 정밀 충돌 체크 (교차 또는 접촉)
-                if test_poly.intersects(placed_poly):
-                    return True
-
-                # 거리 기반 추가 체크 (간격 확보)
-                if test_poly.distance(placed_poly) < self.spacing:  # 간격 이내면 충돌로 간주
-                    return True
+                # spacing=0일 때는 닿는 것(touches) 허용, 겹침만 불허
+                if self.spacing == 0:
+                    # 내부가 겹치는지 체크 (intersection 면적 > 0)
+                    intersection = test_poly.intersection(placed_poly)
+                    if intersection.area > 0.01:  # 0.01mm² 이상 겹치면 충돌
+                        return True
+                else:
+                    # spacing > 0일 때는 기존 로직
+                    if test_poly.intersects(placed_poly):
+                        return True
+                    # 거리 기반 추가 체크 (간격 확보)
+                    if test_poly.distance(placed_poly) < self.spacing:
+                        return True
 
             return False
         except Exception as e:
@@ -393,7 +1092,7 @@ class NestingEngine:
         return positions
 
     def _find_position_nfp(self, pattern_coords):
-        """NFP 기반 최적 배치 위치 찾기 - 빈틈 채우기 방식"""
+        """NFP 기반 최적 배치 위치 찾기 - 인터락킹 최적화"""
         bounds = self._get_bounds(pattern_coords)
         pattern_width = bounds['width']
         pattern_height = bounds['height']
@@ -406,43 +1105,47 @@ class NestingEngine:
         candidates = []
         max_y = max([b[3] for b in self._placed_bounds]) if self._placed_bounds else 0
 
-        # 1. NFP 경계점만 수집 (그리드 제외 - 속도 향상)
+        # 1. NFP 경계 밀착 샘플링 (인터락킹 위치 찾기)
         for i, placed_coords in enumerate(self._placed_coords):
             nfp = self._calculate_nfp(placed_coords, pattern_coords)
             if nfp:
-                for point in nfp:
-                    if (0 <= point[0] <= self.sheet_width - pattern_width and
-                        0 <= point[1] <= self.sheet_height - pattern_height):
-                        candidates.append((point[0], point[1]))
+                n = len(nfp)
+                for j in range(n):
+                    p1 = nfp[j]
+                    p2 = nfp[(j + 1) % n]
+
+                    # 변을 10등분하여 샘플링 (더 정밀한 인터락킹)
+                    for t in range(11):
+                        ratio = t / 10.0
+                        px = p1[0] + (p2[0] - p1[0]) * ratio
+                        py = p1[1] + (p2[1] - p1[1]) * ratio
+
+                        if (0 <= px <= self.sheet_width - pattern_width and
+                            0 <= py <= self.sheet_height - pattern_height):
+                            candidates.append((px, py))
 
         # 2. 인접 배치 위치 추가 (빈틈 채우기)
         for placed_bounds in self._placed_bounds:
-            # 패턴 오른쪽 (간격 포함)
             right_x = placed_bounds[2] + self.spacing
             if right_x + pattern_width <= self.sheet_width:
-                for y_offset in [0, -pattern_height/4, -pattern_height/2]:
-                    candidates.append((right_x, max(0, placed_bounds[1] + y_offset)))
+                for y_offset in [0, -pattern_height/4, -pattern_height/2, -pattern_height*3/4]:
+                    y_pos = placed_bounds[1] + y_offset
+                    if y_pos >= 0:
+                        candidates.append((right_x, y_pos))
 
-            # 패턴 위쪽
             top_y = placed_bounds[3] + self.spacing
-            for x_offset in [0, pattern_width/4, pattern_width/2]:
+            for x_offset in [0, pattern_width/4, pattern_width/2, pattern_width*3/4]:
                 candidates.append((max(0, placed_bounds[0] + x_offset), top_y))
 
-        # 3. 시트 왼쪽 경계
-        for y in range(0, int(max_y + pattern_height), 50):
+        # 3. 시트 왼쪽 경계 (더 촘촘하게)
+        for y in range(0, int(max_y + pattern_height), 20):
             candidates.append((0, y))
 
         # 4. 새 행 시작점
         candidates.append((0, max_y + self.spacing))
 
-        # 5. 세밀한 그리드 (제한된 영역만)
-        step = 5  # 5mm 정밀도
-        for y in range(0, min(int(max_y + 100), 500), step):
-            for x in range(0, int(self.sheet_width - pattern_width), step * 2):
-                candidates.append((x, y))
-
         # 중복 제거 및 정렬 (Y 우선, X 차순)
-        candidates = list(set(candidates))
+        candidates = list(set((int(x), int(y)) for x, y in candidates))
         candidates.sort(key=lambda p: (p[1], p[0]))
 
         # 최적 위치 찾기
@@ -453,6 +1156,9 @@ class NestingEngine:
                 continue
 
             if not self._check_collision_optimized(test_coords):
+                # 슬라이딩으로 빈틈 최소화
+                if self.spacing == 0:
+                    x, y = self._slide_to_touch(pattern_coords, x, y)
                 return (x, y)
 
         # 못 찾으면 새 행에 배치
@@ -588,6 +1294,10 @@ def create_nesting_visualization(result, sheet_width_cm):
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
     from matplotlib.collections import PatchCollection
+
+    # 한글 폰트 설정
+    plt.rcParams['font.family'] = 'Malgun Gothic'
+    plt.rcParams['axes.unicode_minus'] = False
 
     if not result['success']:
         return None
