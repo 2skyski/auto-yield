@@ -220,6 +220,66 @@ def check_symmetry(poly):
     except:
         return False, "오류"
 
+
+def check_horizontal_edges(poly):
+    """
+    패턴의 가로변(상단/하단)이 직선이거나 평행선인지 판별합니다.
+    조건1: 상단 또는 하단 중 한 변이 직선 (Y좌표 변화 1% 이내)
+    조건2: 상하단이 평행선 (가로 길이 비율 60% 이상)
+    """
+    try:
+        coords = list(poly.exterior.coords)
+        if len(coords) < 4:
+            return False, "점 부족"
+
+        minx, miny, maxx, maxy = poly.bounds
+        height = maxy - miny
+        width = maxx - minx
+
+        # 상단/하단 영역 정의 (전체 높이의 10% 이내)
+        top_threshold = maxy - height * 0.1
+        bottom_threshold = miny + height * 0.1
+
+        # 상단/하단에 위치한 점들 추출
+        top_points = [(x, y) for x, y in coords if y >= top_threshold]
+        bottom_points = [(x, y) for x, y in coords if y <= bottom_threshold]
+
+        def is_straight_line(points, tolerance_ratio=0.01):
+            """점들이 직선(수평선)인지 판별 (Y좌표 변화가 거의 없음)"""
+            if len(points) < 2:
+                return False
+            y_values = [p[1] for p in points]
+            y_range = max(y_values) - min(y_values)
+            return y_range < height * tolerance_ratio
+
+        def get_edge_length(points):
+            """점들의 X방향 너비 (가로 길이)"""
+            if len(points) < 2:
+                return 0
+            x_values = [p[0] for p in points]
+            return max(x_values) - min(x_values)
+
+        # 조건1: 상단 또는 하단이 직선인지 확인
+        top_is_straight = is_straight_line(top_points)
+        bottom_is_straight = is_straight_line(bottom_points)
+
+        if top_is_straight or bottom_is_straight:
+            return True, "직선변"
+
+        # 조건2: 상하단이 평행선인지 확인 (길이 비율 60% 이상)
+        top_length = get_edge_length(top_points)
+        bottom_length = get_edge_length(bottom_points)
+
+        if top_length > 0 and bottom_length > 0:
+            similarity = min(top_length, bottom_length) / max(top_length, bottom_length)
+            if similarity >= 0.6:
+                return True, "평행선"
+
+        return False, "해당없음"
+    except:
+        return False, "오류"
+
+
 # ==============================================================================
 # 3. 핵심 로직: DXF 처리 (Core Logic)
 # ==============================================================================
@@ -514,13 +574,20 @@ if uploaded_file is not None:
             # DXF에서 추출한 원단명 사용 (없으면 겉감)
             extracted_fabric = fabric_name if fabric_name else "겉감"
 
-            # 수량 결정 우선순위:
-            # 1순위: 좌우대칭 + 가로>=25cm + 세로<=15cm → 2장 (부속)
-            # 2순위: 좌우/상하 대칭 + 가로<=25cm + 세로<=25cm → 4장 (FLAP)
-            # 3순위: 대칭이면 1장 (BODY)
-            # 4순위: 비대칭이면 2장 (부속)
+            # 가로변 직선/평행선 여부 확인
+            has_straight_edge, edge_reason = check_horizontal_edges(poly)
 
-            if is_symmetric and sym_reason == "좌우대칭" and w >= 25 and h <= 15:
+            # 수량 결정 우선순위:
+            # 1순위: 좌우대칭 + 가로>=35cm + 세로<=15cm + (직선변 또는 평행선) → 1장 (BODY)
+            # 2순위: 좌우대칭 + 가로>=25cm + 세로<=15cm → 2장 (부속)
+            # 3순위: 대칭 + 가로<=25cm + 세로<=25cm → 4장 (FLAP)
+            # 4순위: 대칭이면 1장 (BODY)
+            # 5순위: 비대칭이면 2장 (부속)
+
+            if is_symmetric and sym_reason == "좌우대칭" and w >= 35 and h <= 15 and has_straight_edge:
+                count = 1
+                default_desc = "BODY"
+            elif is_symmetric and sym_reason == "좌우대칭" and w >= 25 and h <= 15:
                 count = 2
                 default_desc = "부속"
             elif is_symmetric and w <= 25 and h <= 25:
