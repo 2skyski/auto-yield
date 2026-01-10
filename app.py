@@ -968,12 +968,15 @@ if uploaded_file is not None:
                 nest_rotation = st.checkbox(
                     "180도 회전 허용",
                     value=True,
-                    help="패턴을 180도 회전하여 배치할 수 있음",
+                    help="패턴을 180도 회전하여 배치",
                     key="nest_rotation"
                 )
 
-            # 원단별 폭은 요척 결과에서 자동으로 가져옴
+            # 원단별 폭 및 마카 벌수 설정
             fabric_widths = {}
+            marker_quantities = {}
+
+            st.caption("원단별 설정:")
             for i, fabric in enumerate(fabric_list):
                 # 요척 결과에서 설정한 폭과 단위 가져오기
                 width_val = st.session_state.get(f"w{i}", 58.0)
@@ -985,8 +988,17 @@ if uploaded_file is not None:
                     width_cm = width_val
                 fabric_widths[fabric] = width_cm
 
-            # 원단별 폭 표시 (읽기 전용)
-            st.caption("원단폭: " + " | ".join([f"**{fabric}**: {fabric_widths[fabric]:.1f}cm" for fabric in fabric_list]))
+                # 원단별 마카 벌수 입력
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.text(f"{fabric}: 폭 {width_cm:.1f}cm")
+                with col2:
+                    marker_quantities[fabric] = st.number_input(
+                        "벌수",
+                        min_value=1, max_value=10, value=1,
+                        key=f"marker_qty_{i}",
+                        label_visibility="collapsed"
+                    )
 
             if st.button("🚀 네스팅 실행", use_container_width=True, type="primary"):
                 with st.spinner("원단별 네스팅 계산 중..."):
@@ -1008,14 +1020,16 @@ if uploaded_file is not None:
                                 spacing=nest_spacing
                             )
 
-                            # 패턴 추가
+                            # 패턴 추가 (원단별 마카 벌수 적용)
+                            fabric_marker_qty = marker_quantities.get(fabric, 1)
                             for idx in fabric_indices:
                                 if idx < len(patterns):
                                     row = st.session_state.df.loc[idx]
                                     poly = patterns[idx][0]
                                     coords = list(poly.exterior.coords)[:-1]
                                     coords_cm = [[p[0] / 10, p[1] / 10] for p in coords]
-                                    quantity = int(row['수량'])
+                                    # 수량 × 원단별 마카 벌수
+                                    quantity = int(row['수량']) * fabric_marker_qty
                                     pattern_id = str(row['구분'])[:10] if row['구분'] else f"P{idx+1}"
                                     engine.add_pattern(coords_cm, quantity=quantity, pattern_id=pattern_id)
 
@@ -1024,6 +1038,7 @@ if uploaded_file is not None:
                             result = engine.run(rotations=rotations)
                             result['fabric'] = fabric
                             result['width_cm'] = fabric_widths[fabric]
+                            result['marker_quantity'] = fabric_marker_qty
                             nesting_results[fabric] = result
 
                         # 결과 저장
@@ -1039,7 +1054,8 @@ if uploaded_file is not None:
                 for fabric, result in results.items():
                     color = get_fabric_color_hex(fabric)
 
-                    with st.expander(f"📦 {fabric} 네스팅 결과", expanded=True):
+                    marker_qty = result.get('marker_quantity', 1)
+                    with st.expander(f"📦 {fabric} 네스팅 결과 ({marker_qty}벌)", expanded=True):
                         if result['success']:
                             # 결과 메트릭
                             m1, m2, m3, m4 = st.columns(4)

@@ -1,22 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-네스팅 엔진 모듈 (최적화 버전)
+네스팅 엔진 모듈 (NFP 개선 버전)
 - NFP(No-Fit Polygon) 기반 2D 패턴 네스팅
 - Python 3 + Shapely + pyclipper
-- 최적화: 공간 인덱싱, 바운딩박스 사전체크, 적응형 그리드
+- NFP 경로 기반 최적 배치 알고리즘
 """
 
 import pyclipper
-from shapely.geometry import Polygon as ShapelyPolygon, Point, box
+from shapely.geometry import Polygon as ShapelyPolygon, Point, box, LineString
 from shapely.prepared import prep
 from shapely import affinity
 from shapely.strtree import STRtree
+from shapely.ops import unary_union
 import copy
 import math
 
+# pyclipper 스케일 (정수 변환용)
+CLIPPER_SCALE = 1000
+
 
 class NestingEngine:
-    """NFP 기반 네스팅 엔진 (최적화 버전)"""
+    """NFP 기반 네스팅 엔진 (NFP 개선 버전)"""
 
     def __init__(self, sheet_width, sheet_height=10000, spacing=5):
         """
@@ -35,7 +39,11 @@ class NestingEngine:
         # 최적화용 캐시
         self._placed_polygons = []  # Shapely Polygon 객체들
         self._placed_bounds = []    # 바운딩 박스들
+        self._placed_coords = []    # 원본 좌표들
         self._spatial_index = None  # STRtree 공간 인덱스
+
+        # NFP 사용 여부 (현재 Grid 방식이 더 효율적)
+        self.use_nfp = False
 
     def add_pattern(self, polygon, quantity=1, pattern_id=None):
         """
@@ -81,7 +89,7 @@ class NestingEngine:
 
     def run(self, rotations=[0], iterations=3):
         """
-        네스팅 실행 (최적화 버전)
+        네스팅 실행 (NFP 개선 버전)
 
         Args:
             rotations: 허용 회전 각도 리스트 (예: [0, 90, 180, 270])
@@ -97,12 +105,9 @@ class NestingEngine:
         self.placements = []
         self._placed_polygons = []
         self._placed_bounds = []
+        self._placed_coords = []  # NFP 계산용 좌표 저장
         self._spatial_index = None
-
-        # 현재 행의 Y 위치와 높이 추적 (행 기반 패킹)
-        current_row_y = 0
-        current_row_height = 0
-        current_row_x = 0
+        self.nfp_cache = {}  # NFP 캐시 초기화
 
         for pattern in self.patterns:
             best_position = None
@@ -114,19 +119,18 @@ class NestingEngine:
             for rotation in rotations:
                 rotated_coords = self._rotate_polygon(pattern['coords'], rotation)
 
-                # 간격 적용
-                offset_coords = self._offset_polygon(rotated_coords, self.spacing)
-                if offset_coords is None:
-                    continue
-
-                # 가능한 배치 위치 찾기 (최적화된 버전)
-                position = self._find_position_optimized(offset_coords)
+                # 간격은 충돌 체크에서 적용 (패턴 자체는 원본 사용)
+                # 가능한 배치 위치 찾기
+                if self.use_nfp:
+                    position = self._find_position_nfp(rotated_coords)
+                else:
+                    position = self._find_position_optimized(rotated_coords)
 
                 if position and position[1] < best_y:
                     best_position = position
                     best_y = position[1]
                     best_rotation = rotation
-                    best_coords = offset_coords
+                    best_coords = rotated_coords
 
             if best_position:
                 # 배치 적용
@@ -145,6 +149,7 @@ class NestingEngine:
                     placed_poly = placed_poly.buffer(0)
                 self._placed_polygons.append(placed_poly)
                 self._placed_bounds.append(placed_poly.bounds)
+                self._placed_coords.append(final_coords)  # NFP 계산용
 
                 # 공간 인덱스 재구축 (5개마다)
                 if len(self._placed_polygons) % 5 == 0:
@@ -161,65 +166,74 @@ class NestingEngine:
         return self._calculate_result()
 
     def _find_position_optimized(self, pattern_coords):
-        """최적화된 Bottom-Left 알고리즘으로 배치 위치 찾기"""
+        """최적화된 Bottom-Left 알고리즘 (적응형 스텝 + 우선 탐색)"""
         pattern_bounds = self._get_bounds(pattern_coords)
         pattern_width = pattern_bounds['width']
         pattern_height = pattern_bounds['height']
-
-        # 적응형 스텝 크기 (패턴 크기에 비례)
-        step_x = max(20, int(pattern_width / 10))
-        step_y = max(20, int(pattern_height / 10))
 
         # 배치된 패턴이 없으면 원점에 배치
         if not self._placed_polygons:
             return (0, 0)
 
-        # 현재까지 사용된 최대 Y 위치 + 여유 공간
+        # 현재까지 사용된 최대 Y 위치
         max_used_y = 0
         for bounds in self._placed_bounds:
-            max_used_y = max(max_used_y, bounds[3])  # bounds[3] = max_y
+            max_used_y = max(max_used_y, bounds[3])
 
-        # 검색 범위 제한 (성능 최적화)
-        search_height = min(max_used_y + pattern_height * 2, self.sheet_height)
+        # 1단계: 우선 탐색 위치 (인접 영역)
+        priority_positions = []
+        for placed_bounds in self._placed_bounds:
+            # 패턴 오른쪽
+            right_x = placed_bounds[2] + self.spacing
+            if right_x + pattern_width <= self.sheet_width:
+                priority_positions.append((right_x, placed_bounds[1]))
+            # 패턴 위
+            top_y = placed_bounds[3] + self.spacing
+            priority_positions.append((0, top_y))
+            priority_positions.append((placed_bounds[0], top_y))
 
-        best_position = None
-        best_y = float('inf')
+        # 우선 위치 Y 기준 정렬
+        priority_positions.sort(key=lambda p: (p[1], p[0]))
 
-        # Y 우선 탐색 (Bottom-Left)
+        # 우선 위치에서 빠르게 검색
+        for x, y in priority_positions:
+            if x < 0 or y < 0:
+                continue
+            test_coords = self._translate_polygon(pattern_coords, x, y)
+            if self._is_inside_sheet(test_coords) and not self._check_collision_optimized(test_coords):
+                return (x, y)
+
+        # 2단계: 그리드 탐색 (5mm 스텝 - 높은 효율)
+        step = 5
+        search_height = max_used_y + pattern_height + self.spacing * 2
+
         y = 0
-        while y < search_height:
+        while y <= search_height:
             x = 0
-            while x < self.sheet_width - pattern_width:
-                # 패턴을 해당 위치로 이동
+            while x <= self.sheet_width - pattern_width:
                 test_coords = self._translate_polygon(pattern_coords, x, y)
 
-                # 시트 범위 체크
                 if not self._is_inside_sheet(test_coords):
-                    x += step_x
+                    x += step
                     continue
 
-                # 최적화된 충돌 체크
                 if not self._check_collision_optimized(test_coords):
-                    if y < best_y:
-                        best_y = y
-                        best_position = (x, y)
-                    break  # 현재 Y에서 첫 위치 찾으면 종료
+                    return (x, y)
 
-                x += step_x
-
-            if best_position and best_position[1] == y:
-                break  # 유효 위치 찾으면 종료
-
-            y += step_y
+                x += step
+            y += step
 
         # 찾지 못했으면 새 행에 배치
-        if best_position is None:
-            best_position = (0, int(max_used_y + self.spacing))
+        new_y = int(max_used_y + self.spacing)
+        for x in range(0, int(self.sheet_width - pattern_width) + 1, step):
+            test_coords = self._translate_polygon(pattern_coords, x, new_y)
+            if self._is_inside_sheet(test_coords) and not self._check_collision_optimized(test_coords):
+                return (x, new_y)
 
-        return best_position
+        return (0, new_y + int(pattern_height) + self.spacing)
 
     def _check_collision_optimized(self, coords):
-        """최적화된 충돌 체크 (바운딩박스 + 공간인덱싱)"""
+        """최적화된 충돌 체크 (바운딩박스 + 직접비교)"""
         try:
             test_poly = ShapelyPolygon(coords)
             if not test_poly.is_valid:
@@ -227,37 +241,29 @@ class NestingEngine:
 
             test_bounds = test_poly.bounds  # (minx, miny, maxx, maxy)
 
-            # 배치된 폴리곤이 적으면 직접 비교
-            if len(self._placed_polygons) < 5:
-                for i, placed_poly in enumerate(self._placed_polygons):
-                    placed_bounds = self._placed_bounds[i]
+            # 모든 배치된 폴리곤과 직접 비교 (안정성 우선)
+            for i, placed_poly in enumerate(self._placed_polygons):
+                placed_bounds = self._placed_bounds[i]
 
-                    # 바운딩박스 사전 체크 (빠른 배제)
-                    if (test_bounds[2] < placed_bounds[0] or  # test_max_x < placed_min_x
-                        test_bounds[0] > placed_bounds[2] or  # test_min_x > placed_max_x
-                        test_bounds[3] < placed_bounds[1] or  # test_max_y < placed_min_y
-                        test_bounds[1] > placed_bounds[3]):   # test_min_y > placed_max_y
-                        continue  # 바운딩박스 겹치지 않음
+                # 바운딩박스 사전 체크 (빠른 배제) - 간격 포함
+                margin = self.spacing
+                if (test_bounds[2] + margin < placed_bounds[0] or
+                    test_bounds[0] - margin > placed_bounds[2] or
+                    test_bounds[3] + margin < placed_bounds[1] or
+                    test_bounds[1] - margin > placed_bounds[3]):
+                    continue  # 바운딩박스 겹치지 않음
 
-                    # 정밀 충돌 체크
-                    if test_poly.intersects(placed_poly):
-                        return True
-            else:
-                # 공간 인덱싱 사용
-                if self._spatial_index is None:
-                    self._spatial_index = STRtree(self._placed_polygons)
+                # 정밀 충돌 체크 (교차 또는 접촉)
+                if test_poly.intersects(placed_poly):
+                    return True
 
-                # 바운딩박스로 후보 필터링
-                test_box = box(*test_bounds)
-                candidates = self._spatial_index.query(test_box)
-
-                for candidate in candidates:
-                    if test_poly.intersects(candidate):
-                        return True
+                # 거리 기반 추가 체크 (간격 확보)
+                if test_poly.distance(placed_poly) < self.spacing:  # 간격 이내면 충돌로 간주
+                    return True
 
             return False
-        except Exception:
-            return True
+        except Exception as e:
+            return True  # 에러시 충돌로 처리
 
     def _find_position(self, pattern_coords, placed_polygons, sheet):
         """Bottom-Left 알고리즘으로 배치 위치 찾기 (레거시 호환)"""
@@ -287,6 +293,170 @@ class NestingEngine:
             return False
         except:
             return True
+
+    # ==================== NFP 관련 함수 ====================
+
+    def _to_clipper_coords(self, coords):
+        """좌표를 pyclipper 정수 형식으로 변환"""
+        return [[int(p[0] * CLIPPER_SCALE), int(p[1] * CLIPPER_SCALE)] for p in coords]
+
+    def _from_clipper_coords(self, coords):
+        """pyclipper 정수 형식을 실수 좌표로 변환"""
+        return [[p[0] / CLIPPER_SCALE, p[1] / CLIPPER_SCALE] for p in coords]
+
+    def _calculate_nfp(self, fixed_coords, moving_coords):
+        """
+        NFP(No-Fit Polygon) 계산
+        - fixed_coords: 고정된 패턴 좌표
+        - moving_coords: 이동할 패턴 좌표
+        - 반환: NFP 좌표 리스트 (moving 패턴의 기준점이 위치할 수 없는 영역)
+        """
+        cache_key = (tuple(map(tuple, fixed_coords)), tuple(map(tuple, moving_coords)))
+        if cache_key in self.nfp_cache:
+            return self.nfp_cache[cache_key]
+
+        try:
+            # moving 폴리곤을 원점 기준으로 반전 (Minkowski difference)
+            moving_reflected = [[-p[0], -p[1]] for p in moving_coords]
+
+            # pyclipper 형식으로 변환
+            fixed_scaled = self._to_clipper_coords(fixed_coords)
+            moving_scaled = self._to_clipper_coords(moving_reflected)
+
+            # Minkowski Sum 계산 = NFP
+            result = pyclipper.MinkowskiSum(fixed_scaled, moving_scaled, True)
+
+            if result and len(result) > 0:
+                # 가장 큰 폴리곤 선택 (외곽)
+                largest = max(result, key=lambda p: abs(pyclipper.Area(p)))
+                nfp = self._from_clipper_coords(largest)
+                self.nfp_cache[cache_key] = nfp
+                return nfp
+
+        except Exception as e:
+            pass
+
+        return None
+
+    def _calculate_ifp(self, pattern_coords):
+        """
+        IFP(Inner Fit Polygon) 계산 - 시트 내부에서 패턴이 배치될 수 있는 영역
+        - pattern_coords: 패턴 좌표 (원점 기준 정규화된)
+        - 반환: IFP 좌표 리스트
+        """
+        bounds = self._get_bounds(pattern_coords)
+        pattern_width = bounds['width']
+        pattern_height = bounds['height']
+
+        # 시트에서 패턴 크기만큼 축소한 영역 = 패턴 기준점이 위치할 수 있는 영역
+        ifp = [
+            [0, 0],
+            [self.sheet_width - pattern_width, 0],
+            [self.sheet_width - pattern_width, self.sheet_height - pattern_height],
+            [0, self.sheet_height - pattern_height]
+        ]
+        return ifp
+
+    def _get_nfp_positions(self, pattern_coords):
+        """
+        NFP를 이용해 가능한 배치 위치 후보 생성
+        - 모든 배치된 패턴과의 NFP 경계점 + IFP 경계점 반환
+        """
+        positions = []
+        bounds = self._get_bounds(pattern_coords)
+
+        # IFP 꼭짓점 (시트 경계)
+        ifp = self._calculate_ifp(pattern_coords)
+        for point in ifp:
+            positions.append((point[0], point[1], 'ifp'))
+
+        # 배치된 각 패턴과의 NFP 경계점
+        for i, placed_coords in enumerate(self._placed_coords):
+            nfp = self._calculate_nfp(placed_coords, pattern_coords)
+            if nfp:
+                # NFP 꼭짓점들을 후보에 추가
+                for point in nfp:
+                    # 시트 범위 내인지 확인
+                    if (0 <= point[0] <= self.sheet_width - bounds['width'] and
+                        0 <= point[1] <= self.sheet_height - bounds['height']):
+                        positions.append((point[0], point[1], f'nfp_{i}'))
+
+                # NFP 변의 중점도 추가 (더 정밀한 배치)
+                for j in range(len(nfp)):
+                    p1 = nfp[j]
+                    p2 = nfp[(j + 1) % len(nfp)]
+                    mid = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2]
+                    if (0 <= mid[0] <= self.sheet_width - bounds['width'] and
+                        0 <= mid[1] <= self.sheet_height - bounds['height']):
+                        positions.append((mid[0], mid[1], f'nfp_mid_{i}'))
+
+        return positions
+
+    def _find_position_nfp(self, pattern_coords):
+        """NFP 기반 최적 배치 위치 찾기 - 빈틈 채우기 방식"""
+        bounds = self._get_bounds(pattern_coords)
+        pattern_width = bounds['width']
+        pattern_height = bounds['height']
+
+        # 배치된 패턴이 없으면 원점에 배치
+        if not self._placed_coords:
+            return (0, 0)
+
+        # 후보 위치 수집 (NFP 경계 + 인접 위치)
+        candidates = []
+        max_y = max([b[3] for b in self._placed_bounds]) if self._placed_bounds else 0
+
+        # 1. NFP 경계점만 수집 (그리드 제외 - 속도 향상)
+        for i, placed_coords in enumerate(self._placed_coords):
+            nfp = self._calculate_nfp(placed_coords, pattern_coords)
+            if nfp:
+                for point in nfp:
+                    if (0 <= point[0] <= self.sheet_width - pattern_width and
+                        0 <= point[1] <= self.sheet_height - pattern_height):
+                        candidates.append((point[0], point[1]))
+
+        # 2. 인접 배치 위치 추가 (빈틈 채우기)
+        for placed_bounds in self._placed_bounds:
+            # 패턴 오른쪽 (간격 포함)
+            right_x = placed_bounds[2] + self.spacing
+            if right_x + pattern_width <= self.sheet_width:
+                for y_offset in [0, -pattern_height/4, -pattern_height/2]:
+                    candidates.append((right_x, max(0, placed_bounds[1] + y_offset)))
+
+            # 패턴 위쪽
+            top_y = placed_bounds[3] + self.spacing
+            for x_offset in [0, pattern_width/4, pattern_width/2]:
+                candidates.append((max(0, placed_bounds[0] + x_offset), top_y))
+
+        # 3. 시트 왼쪽 경계
+        for y in range(0, int(max_y + pattern_height), 50):
+            candidates.append((0, y))
+
+        # 4. 새 행 시작점
+        candidates.append((0, max_y + self.spacing))
+
+        # 5. 세밀한 그리드 (제한된 영역만)
+        step = 5  # 5mm 정밀도
+        for y in range(0, min(int(max_y + 100), 500), step):
+            for x in range(0, int(self.sheet_width - pattern_width), step * 2):
+                candidates.append((x, y))
+
+        # 중복 제거 및 정렬 (Y 우선, X 차순)
+        candidates = list(set(candidates))
+        candidates.sort(key=lambda p: (p[1], p[0]))
+
+        # 최적 위치 찾기
+        for x, y in candidates:
+            test_coords = self._translate_polygon(pattern_coords, x, y)
+
+            if not self._is_inside_sheet(test_coords):
+                continue
+
+            if not self._check_collision_optimized(test_coords):
+                return (x, y)
+
+        # 못 찾으면 새 행에 배치
+        return (0, int(max_y + self.spacing))
 
     def _calculate_result(self):
         """네스팅 결과 계산"""
