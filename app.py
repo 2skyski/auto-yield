@@ -515,23 +515,23 @@ if uploaded_file is not None:
             extracted_fabric = fabric_name if fabric_name else "겉감"
 
             # 수량 결정 우선순위:
-            # 1순위: 좌우대칭 + 가로>=25cm + 세로<=15cm → 2장 (COLLAR)
+            # 1순위: 좌우대칭 + 가로>=25cm + 세로<=15cm → 2장 (부속)
             # 2순위: 좌우/상하 대칭 + 가로<=25cm + 세로<=25cm → 4장 (FLAP)
-            # 3순위: 대칭이면 1장 (BODY/SLEEVE)
-            # 4순위: 비대칭이면 2장 (COLLAR)
+            # 3순위: 대칭이면 1장 (BODY)
+            # 4순위: 비대칭이면 2장 (부속)
 
             if is_symmetric and sym_reason == "좌우대칭" and w >= 25 and h <= 15:
                 count = 2
-                default_desc = "COLLAR"
+                default_desc = "부속"
             elif is_symmetric and w <= 25 and h <= 25:
                 count = 4
                 default_desc = "FLAP"
             elif is_symmetric:
                 count = 1
-                default_desc = "BODY/SLEEVE"
+                default_desc = "BODY"
             else:
                 count = 2
-                default_desc = "COLLAR"
+                default_desc = "부속"
 
             # DXF 텍스트에서 패턴 이름이 있으면 사용, 없으면 기본값
             desc = pattern_name if pattern_name else default_desc
