@@ -181,6 +181,10 @@ def create_sparrow_visualization(result, sheet_width_cm):
     # 색상 팔레트
     colors = plt.cm.Set3(range(12))
 
+    # 패턴 이름별 색상 매핑 (같은 패턴은 같은 색상)
+    unique_patterns = list(set(p['pattern_id'].split('_')[0] for p in result['placements']))
+    pattern_color_map = {name: colors[i % len(colors)] for i, name in enumerate(unique_patterns)}
+
     # 패턴 그리기
     for i, p in enumerate(result['placements']):
         coords = p['coords']
@@ -188,13 +192,14 @@ def create_sparrow_visualization(result, sheet_width_cm):
             # coords는 이미 배치된 좌표
             xs = [c[0] for c in coords]
             ys = [c[1] for c in coords]
-            color = colors[i % len(colors)]
+            pattern_name = p['pattern_id'].split('_')[0]
+            color = pattern_color_map.get(pattern_name, colors[0])
             ax.fill(xs, ys, alpha=0.7, facecolor=color, edgecolor='black', linewidth=0.5)
 
             # 패턴 ID 표시
             cx = sum(xs) / len(xs)
             cy = sum(ys) / len(ys)
-            label = p['pattern_id'].split('_')[0][:6]
+            label = pattern_name[:6]
             ax.text(cx, cy, label, ha='center', va='center', fontsize=6, fontweight='bold')
 
     ax.set_xlim(-1, sheet_width_cm + 1)
@@ -322,9 +327,11 @@ except: pass
 # ==============================================================================
 
 def export_nesting_to_excel(nesting_results, timestamp):
-    """네스팅 결과를 엑셀로 내보내기"""
+    """네스팅 결과를 엑셀로 내보내기 (마카 이미지 포함)"""
     from io import BytesIO
     import pandas as pd
+    from openpyxl.drawing.image import Image as XLImage
+    import matplotlib.pyplot as plt
 
     output = BytesIO()
 
@@ -349,6 +356,45 @@ def export_nesting_to_excel(nesting_results, timestamp):
         if summary_data:
             df_summary = pd.DataFrame(summary_data)
             df_summary.to_excel(writer, sheet_name='마카요약', index=False)
+
+        # 마카 이미지 시트 (원단별)
+        for fabric, result in nesting_results.items():
+            if result.get('success'):
+                try:
+                    # 마카 시각화 생성 (Sparrow 모드 확인)
+                    width_cm = result.get('width_cm', 150)
+                    if result.get('sparrow_mode'):
+                        fig = create_sparrow_visualization(result, width_cm)
+                    else:
+                        fig = create_nesting_visualization(result, width_cm)
+
+                    if fig:
+                        # Figure를 이미지로 변환
+                        img_buffer = BytesIO()
+                        fig.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight',
+                                   facecolor='white', edgecolor='none')
+                        img_buffer.seek(0)
+                        plt.close(fig)
+
+                        # 빈 시트 생성
+                        sheet_name = f"{fabric[:10]}_마카"
+                        pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
+
+                        # 이미지 삽입
+                        ws = writer.sheets[sheet_name]
+                        img = XLImage(img_buffer)
+                        # 이미지 크기 조정 (가로 800px 기준, 원본 비율 유지)
+                        orig_width = img.width
+                        orig_height = img.height
+                        if orig_width > 0:
+                            img.width = 800
+                            img.height = int(orig_height * (800 / orig_width))
+                        ws.add_image(img, 'A1')
+
+                        # 열 너비 조정
+                        ws.column_dimensions['A'].width = 120
+                except Exception as e:
+                    print(f"마카 이미지 생성 오류 ({fabric}): {e}")
 
         # 배치 상세 시트 (원단별)
         for fabric, result in nesting_results.items():

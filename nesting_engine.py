@@ -1322,10 +1322,15 @@ def create_nesting_visualization(result, sheet_width_cm):
     colors = ['#4c78a8', '#e45756', '#f58518', '#72b7b2', '#54a24b',
               '#eeca3b', '#b279a2', '#ff9da6', '#9d755d', '#bab0ac']
 
+    # 패턴 이름별 색상 매핑 (같은 패턴은 같은 색상)
+    unique_patterns = list(set(p['id'].split('_')[0] for p in result['placements']))
+    pattern_color_map = {name: colors[i % len(colors)] for i, name in enumerate(unique_patterns)}
+
     # 패턴들 그리기
     for i, placement in enumerate(result['placements']):
         coords = placement['coords']
-        color = colors[i % len(colors)]
+        pattern_name = placement['id'].split('_')[0]
+        color = pattern_color_map.get(pattern_name, colors[0])
 
         poly = patches.Polygon(
             coords, closed=True,
@@ -1337,7 +1342,7 @@ def create_nesting_visualization(result, sheet_width_cm):
         # 패턴 ID 표시
         cx = sum(p[0] for p in coords) / len(coords)
         cy = sum(p[1] for p in coords) / len(coords)
-        ax.text(cx, cy, placement['id'].split('_')[0][:6],
+        ax.text(cx, cy, pattern_name[:6],
                 ha='center', va='center', fontsize=6, color='white', weight='bold')
 
     # 축 설정
