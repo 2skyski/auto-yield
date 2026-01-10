@@ -23,6 +23,9 @@ import os
 import io
 import base64
 
+# 네스팅 엔진 임포트
+from nesting_engine import NestingEngine, create_nesting_visualization
+
 # ==============================================================================
 # 1. 페이지 및 스타일 설정 (Configuration & CSS)
 # ==============================================================================
@@ -941,5 +944,120 @@ if uploaded_file is not None:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
+
+            # ----------------------------------------------------------------
+            # F. 네스팅 시뮬레이션 (원단별)
+            # ----------------------------------------------------------------
+            st.divider()
+            st.markdown("#### 🧩 네스팅 시뮬레이션")
+            st.caption("원단별로 개별 네스팅을 실행합니다.")
+
+            # 원단별 설정
+            fabric_list = st.session_state.df['원단'].unique().tolist()
+
+            # 공통 설정
+            common_col1, common_col2 = st.columns(2)
+            with common_col1:
+                nest_spacing = st.number_input(
+                    "패턴 간격 (mm)",
+                    min_value=0, max_value=50, value=5,
+                    help="패턴 사이의 간격",
+                    key="nest_spacing"
+                )
+            with common_col2:
+                nest_rotation = st.checkbox(
+                    "180도 회전 허용",
+                    value=True,
+                    help="패턴을 180도 회전하여 배치할 수 있음",
+                    key="nest_rotation"
+                )
+
+            # 원단별 폭은 요척 결과에서 자동으로 가져옴
+            fabric_widths = {}
+            for i, fabric in enumerate(fabric_list):
+                # 요척 결과에서 설정한 폭과 단위 가져오기
+                width_val = st.session_state.get(f"w{i}", 58.0)
+                unit_val = st.session_state.get(f"unit{i}", "in")
+                # cm로 변환
+                if unit_val == "in":
+                    width_cm = width_val * 2.54
+                else:
+                    width_cm = width_val
+                fabric_widths[fabric] = width_cm
+
+            # 원단별 폭 표시 (읽기 전용)
+            st.caption("원단폭: " + " | ".join([f"**{fabric}**: {fabric_widths[fabric]:.1f}cm" for fabric in fabric_list]))
+
+            if st.button("🚀 네스팅 실행", use_container_width=True, type="primary"):
+                with st.spinner("원단별 네스팅 계산 중..."):
+                    try:
+                        nesting_results = {}
+
+                        # 원단별로 네스팅 실행
+                        for fabric in fabric_list:
+                            # 해당 원단의 패턴만 필터링
+                            fabric_df = st.session_state.df[st.session_state.df['원단'] == fabric]
+                            fabric_indices = fabric_df.index.tolist()
+
+                            if len(fabric_indices) == 0:
+                                continue
+
+                            # 네스팅 엔진 생성
+                            engine = NestingEngine(
+                                sheet_width=fabric_widths[fabric] * 10,  # cm → mm
+                                spacing=nest_spacing
+                            )
+
+                            # 패턴 추가
+                            for idx in fabric_indices:
+                                if idx < len(patterns):
+                                    row = st.session_state.df.loc[idx]
+                                    poly = patterns[idx][0]
+                                    coords = list(poly.exterior.coords)[:-1]
+                                    coords_cm = [[p[0] / 10, p[1] / 10] for p in coords]
+                                    quantity = int(row['수량'])
+                                    pattern_id = str(row['구분'])[:10] if row['구분'] else f"P{idx+1}"
+                                    engine.add_pattern(coords_cm, quantity=quantity, pattern_id=pattern_id)
+
+                            # 네스팅 실행
+                            rotations = [0, 180] if nest_rotation else [0]
+                            result = engine.run(rotations=rotations)
+                            result['fabric'] = fabric
+                            result['width_cm'] = fabric_widths[fabric]
+                            nesting_results[fabric] = result
+
+                        # 결과 저장
+                        st.session_state.nesting_results = nesting_results
+
+                    except Exception as e:
+                        st.error(f"네스팅 오류: {str(e)}")
+
+            # 네스팅 결과 표시 (원단별)
+            if 'nesting_results' in st.session_state and st.session_state.nesting_results:
+                results = st.session_state.nesting_results
+
+                for fabric, result in results.items():
+                    color = get_fabric_color_hex(fabric)
+
+                    with st.expander(f"📦 {fabric} 네스팅 결과", expanded=True):
+                        if result['success']:
+                            # 결과 메트릭
+                            m1, m2, m3, m4 = st.columns(4)
+                            m1.metric("배치 패턴", f"{result['placed_count']}/{result['total_count']}")
+                            m2.metric("필요 길이", f"{result['used_length_cm']:.1f} cm")
+                            m3.metric("필요 요척", f"{result['used_length_yd']:.2f} YD")
+                            m4.metric("효율", f"{result['efficiency']}%")
+
+                            # 시각화
+                            try:
+                                fig = create_nesting_visualization(result, result['width_cm'])
+                                if fig:
+                                    st.pyplot(fig)
+                                    plt.close(fig)
+                            except Exception as e:
+                                st.warning(f"시각화 오류: {str(e)}")
+                        else:
+                            st.warning(f"{fabric}: 패턴을 배치할 수 없습니다.")
+
     else:
         st.info("💡 DXF 파일을 업로드하면 패턴 분석이 시작됩니다.")
