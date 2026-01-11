@@ -346,92 +346,148 @@ except: pass
 # ==============================================================================
 
 def export_nesting_to_excel(nesting_results, timestamp):
-    """네스팅 결과를 엑셀로 내보내기 (마카 이미지 포함)"""
+    """네스팅 결과를 엑셀로 내보내기 (한 시트에 모든 데이터 순서대로)"""
     from io import BytesIO
     import pandas as pd
+    from openpyxl import Workbook
     from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils.dataframe import dataframe_to_rows
     import matplotlib.pyplot as plt
 
     output = BytesIO()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "네스팅결과"
 
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # 마카 요약 시트
-        summary_data = []
-        for fabric, result in nesting_results.items():
-            if result.get('success'):
-                marker_qty = result.get('marker_quantity', 1)
-                yield_per_set = result.get('used_length_yd', 0) / marker_qty
-                summary_data.append({
-                    '원단': fabric,
-                    '벌수': marker_qty,
-                    '패턴수': f"{result.get('placed_count', 0)}/{result.get('total_count', 0)}",
-                    '원단폭(cm)': result.get('width_cm', 0),
-                    '마카길이(cm)': round(result.get('used_length_cm', 0), 1),
-                    '요척(YD)': round(yield_per_set, 2),
-                    '효율(%)': result.get('efficiency', 0),
-                    '작업일시': timestamp
-                })
+    # 스타일 정의
+    header_font = Font(bold=True, size=12)
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font_white = Font(bold=True, size=12, color="FFFFFF")
+    section_font = Font(bold=True, size=14)
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
 
-        if summary_data:
-            df_summary = pd.DataFrame(summary_data)
-            df_summary.to_excel(writer, sheet_name='마카요약', index=False)
+    current_row = 1
 
-        # 마카 이미지 시트 (원단별)
-        for fabric, result in nesting_results.items():
-            if result.get('success'):
-                try:
-                    # 마카 시각화 생성 (Sparrow 모드 확인)
-                    width_cm = result.get('width_cm', 150)
-                    if result.get('sparrow_mode'):
-                        fig = create_sparrow_visualization(result, width_cm)
-                    else:
-                        fig = create_nesting_visualization(result, width_cm)
+    # === 1. 마카 요약 섹션 ===
+    ws.cell(row=current_row, column=1, value="■ 마카 요약").font = section_font
+    current_row += 1
 
-                    if fig:
-                        # Figure를 이미지로 변환
-                        img_buffer = BytesIO()
-                        fig.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight',
-                                   facecolor='white', edgecolor='none')
-                        img_buffer.seek(0)
-                        plt.close(fig)
+    summary_headers = ['원단', '벌수', '패턴수', '원단폭(cm)', '마카길이(cm)', '요척(YD)', '효율(%)', '작업일시']
+    for col, header in enumerate(summary_headers, 1):
+        cell = ws.cell(row=current_row, column=col, value=header)
+        cell.font = header_font_white
+        cell.fill = header_fill
+        cell.border = thin_border
+        cell.alignment = Alignment(horizontal='center')
+    current_row += 1
 
-                        # 빈 시트 생성
-                        sheet_name = f"{fabric[:10]}_마카"
-                        pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
+    for fabric, result in nesting_results.items():
+        if result.get('success'):
+            marker_qty = result.get('marker_quantity', 1)
+            yield_per_set = result.get('used_length_yd', 0) / marker_qty
+            row_data = [
+                fabric,
+                marker_qty,
+                f"{result.get('placed_count', 0)}/{result.get('total_count', 0)}",
+                result.get('width_cm', 0),
+                round(result.get('used_length_cm', 0), 1),
+                round(yield_per_set, 2),
+                result.get('efficiency', 0),
+                timestamp
+            ]
+            for col, value in enumerate(row_data, 1):
+                cell = ws.cell(row=current_row, column=col, value=value)
+                cell.border = thin_border
+                cell.alignment = Alignment(horizontal='center')
+            current_row += 1
 
-                        # 이미지 삽입
-                        ws = writer.sheets[sheet_name]
-                        img = XLImage(img_buffer)
-                        # 이미지 크기 조정 (가로 800px 기준, 원본 비율 유지)
-                        orig_width = img.width
-                        orig_height = img.height
-                        if orig_width > 0:
-                            img.width = 800
-                            img.height = int(orig_height * (800 / orig_width))
-                        ws.add_image(img, 'A1')
+    current_row += 2  # 빈 줄 추가
 
-                        # 열 너비 조정
-                        ws.column_dimensions['A'].width = 120
-                except Exception as e:
-                    print(f"마카 이미지 생성 오류 ({fabric}): {e}")
+    # === 2. 원단별 마카 이미지 + 배치 상세 ===
+    for fabric, result in nesting_results.items():
+        if result.get('success'):
+            # 원단명 헤더
+            ws.cell(row=current_row, column=1, value=f"■ {fabric} 마카").font = section_font
+            current_row += 1
 
-        # 배치 상세 시트 (원단별)
-        for fabric, result in nesting_results.items():
-            if result.get('success') and result.get('placements'):
-                placement_data = []
+            # 마카 이미지 삽입
+            try:
+                width_cm = result.get('width_cm', 150)
+                if result.get('sparrow_mode'):
+                    fig = create_sparrow_visualization(result, width_cm)
+                else:
+                    fig = create_nesting_visualization(result, width_cm)
+
+                if fig:
+                    img_buffer = BytesIO()
+                    fig.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight',
+                               facecolor='white', edgecolor='none')
+                    img_buffer.seek(0)
+                    plt.close(fig)
+
+                    img = XLImage(img_buffer)
+                    # 이미지 크기 조정 (가로 700px 기준)
+                    orig_width = img.width
+                    orig_height = img.height
+                    if orig_width > 0:
+                        img.width = 700
+                        img.height = int(orig_height * (700 / orig_width))
+
+                    ws.add_image(img, f'A{current_row}')
+                    # 이미지 높이에 맞춰 행 이동 (대략 이미지 높이 / 15)
+                    img_rows = max(int(img.height / 15), 10)
+                    current_row += img_rows + 1
+            except Exception as e:
+                ws.cell(row=current_row, column=1, value=f"마카 이미지 생성 오류: {e}")
+                current_row += 2
+
+            # 배치 상세 테이블
+            if result.get('placements'):
+                ws.cell(row=current_row, column=1, value=f"▷ {fabric} 배치 상세").font = Font(bold=True, size=11)
+                current_row += 1
+
+                placement_headers = ['번호', '패턴ID', 'X(cm)', 'Y(cm)', '회전(°)']
+                for col, header in enumerate(placement_headers, 1):
+                    cell = ws.cell(row=current_row, column=col, value=header)
+                    cell.font = header_font_white
+                    cell.fill = PatternFill(start_color="70AD47", end_color="70AD47", fill_type="solid")
+                    cell.border = thin_border
+                    cell.alignment = Alignment(horizontal='center')
+                current_row += 1
+
                 for i, p in enumerate(result['placements']):
-                    placement_data.append({
-                        '번호': i + 1,
-                        '패턴ID': p.get('pattern_id', ''),
-                        'X(cm)': round(p.get('x', 0), 1),
-                        'Y(cm)': round(p.get('y', 0), 1),
-                        '회전(°)': p.get('rotation', 0)
-                    })
-                if placement_data:
-                    df_placement = pd.DataFrame(placement_data)
-                    sheet_name = f"{fabric[:10]}_배치"  # 시트명 31자 제한
-                    df_placement.to_excel(writer, sheet_name=sheet_name, index=False)
+                    row_data = [
+                        i + 1,
+                        p.get('pattern_id', ''),
+                        round(p.get('x', 0), 1),
+                        round(p.get('y', 0), 1),
+                        p.get('rotation', 0)
+                    ]
+                    for col, value in enumerate(row_data, 1):
+                        cell = ws.cell(row=current_row, column=col, value=value)
+                        cell.border = thin_border
+                        cell.alignment = Alignment(horizontal='center')
+                    current_row += 1
 
+            current_row += 2  # 원단별 구분 빈 줄
+
+    # 열 너비 조정
+    ws.column_dimensions['A'].width = 15
+    ws.column_dimensions['B'].width = 12
+    ws.column_dimensions['C'].width = 12
+    ws.column_dimensions['D'].width = 14
+    ws.column_dimensions['E'].width = 14
+    ws.column_dimensions['F'].width = 12
+    ws.column_dimensions['G'].width = 10
+    ws.column_dimensions['H'].width = 18
+
+    wb.save(output)
     output.seek(0)
     return output.getvalue()
 
