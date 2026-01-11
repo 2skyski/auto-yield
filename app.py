@@ -63,15 +63,22 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         # 입력시 X와 Y를 교환하여 Sparrow가 올바르게 처리하도록 함
         swapped_coords = [(y, x) for x, y in coords]
 
+        # 좌우 미러링된 좌표 생성 (X축 반전) - 좌/우 패턴 짝 배치용
+        xs = [c[0] for c in swapped_coords]
+        center_x = (min(xs) + max(xs)) / 2
+        mirrored_coords = [(2 * center_x - x, y) for x, y in swapped_coords]
+
         # 회전 옵션
         orientations = [0, 180] if allow_rotation else [0]
 
-        # 수량만큼 아이템 생성
+        # 수량만큼 아이템 생성 (짝수번째는 원본, 홀수번째는 미러링하여 마주보게 배치)
         for q in range(p['quantity']):
             unique_id = f"{p['pattern_id']}_{item_idx}"
+            # 짝수번째(0, 2, 4...)는 원본, 홀수번째(1, 3, 5...)는 미러링
+            use_coords = swapped_coords if q % 2 == 0 else mirrored_coords
             item = spyrrow.Item(
                 id=unique_id,
-                shape=swapped_coords,
+                shape=use_coords,
                 demand=1,
                 allowed_orientations=orientations
             )
@@ -1738,11 +1745,12 @@ if uploaded_file is not None:
             st.markdown("---")
             excel_data = export_nesting_to_excel(results, st.session_state.get('nesting_timestamp', ''))
             if excel_data:
-                timestamp_safe = st.session_state.get('nesting_timestamp', '').replace(':', '-').replace(' ', '_')
+                # DXF 파일 이름에서 확장자 제거
+                dxf_base_name = uploaded_file.name.replace('.dxf', '').replace('.DXF', '')
                 st.download_button(
                     label="📥 네스팅 결과 엑셀 다운로드",
                     data=excel_data,
-                    file_name=f"네스팅결과_{timestamp_safe}.xlsx",
+                    file_name=f"{dxf_base_name}_네스팅결과.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )

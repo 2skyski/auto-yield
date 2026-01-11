@@ -1295,8 +1295,21 @@ def create_nesting_visualization(result, sheet_width_cm):
     import matplotlib.patches as patches
     from matplotlib.collections import PatchCollection
 
-    # 한글 폰트 설정
-    plt.rcParams['font.family'] = 'Malgun Gothic'
+    # 한글 폰트 설정 (크로스 플랫폼)
+    import platform
+    import matplotlib.font_manager as fm
+    import os
+    font_prop = None
+    if platform.system() == 'Windows':
+        plt.rcParams['font.family'] = 'Malgun Gothic'
+    else:
+        # Linux: FontProperties로 직접 폰트 지정
+        font_path = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
+        if os.path.exists(font_path):
+            font_prop = fm.FontProperties(fname=font_path)
+            plt.rcParams['font.family'] = font_prop.get_name()
+        else:
+            plt.rcParams['font.family'] = 'DejaVu Sans'
     plt.rcParams['axes.unicode_minus'] = False
 
     if not result['success']:
@@ -1342,8 +1355,10 @@ def create_nesting_visualization(result, sheet_width_cm):
         # 패턴 ID 표시
         cx = sum(p[0] for p in coords) / len(coords)
         cy = sum(p[1] for p in coords) / len(coords)
-        ax.text(cx, cy, pattern_name[:6],
-                ha='center', va='center', fontsize=6, color='white', weight='bold')
+        text_kwargs = {'ha': 'center', 'va': 'center', 'fontsize': 6, 'color': 'white', 'weight': 'bold'}
+        if font_prop:
+            text_kwargs['fontproperties'] = font_prop
+        ax.text(cx, cy, pattern_name[:6], **text_kwargs)
 
     # 축 설정
     ax.set_xlim(-50, sheet_width_cm * 10 + 50)
