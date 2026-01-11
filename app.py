@@ -278,15 +278,15 @@ st.markdown("""
         text-align: center;
     }
 
-    /* 수량 입력 플러스/마이너스 버튼 크기 확대 */
+    /* 숫자 입력 플러스/마이너스 버튼 크기 (60%) */
     div[data-testid="stNumberInput"] button {
-        width: 40px !important;
-        min-width: 40px !important;
-        padding: 0 10px !important;
+        width: 24px !important;
+        min-width: 24px !important;
+        padding: 0 6px !important;
     }
     div[data-testid="stNumberInput"] button svg {
-        width: 20px !important;
-        height: 20px !important;
+        width: 12px !important;
+        height: 12px !important;
     }
 
     /* 네스팅 결과 expander 제목 크기 25% 확대 */
@@ -1470,3 +1470,14 @@ if uploaded_file is not None:
 
     else:
         st.info("💡 DXF 파일을 업로드하면 패턴 분석이 시작됩니다.")
+
+else:
+    # 초기 화면 (파일 업로드 전)
+    st.info("💡 DXF 파일을 업로드하면 패턴 분석이 시작됩니다.")
+    # 50% 크기로 가운데 배치
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("#### 📺 사용 가이드")
+        # YouTube 썸네일 + 링크 버튼
+        st.image("https://img.youtube.com/vi/Dn_1IsG8J8Q/maxresdefault.jpg", use_container_width=True)
+        st.link_button("▶️ YouTube에서 영상 보기", "https://youtu.be/Dn_1IsG8J8Q", use_container_width=True)
