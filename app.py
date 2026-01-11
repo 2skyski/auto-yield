@@ -69,18 +69,19 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         center_x = (min(xs) + max(xs)) / 2
         mirrored_coords = [(2 * center_x - x, y) for x, y in swapped_coords]
 
-        # 회전 옵션
-        orientations = [0, 180] if allow_rotation else [0]
-
         # 수량만큼 아이템 생성
         for q in range(p['quantity']):
             unique_id = f"{p['pattern_id']}_{item_idx}"
-            # 뒤집기 허용 시: 짝수번째는 원본, 홀수번째는 미러링
-            # 뒤집기 비허용 시: 모두 원본
+            
+            # 180도 회전 옵션 (항상 독립 적용)
+            orientations = [0, 180] if allow_rotation else [0]
+            
+            # 좌우 마주 보기 옵션 (180도 회전과 독립)
             if allow_mirror:
-                use_coords = swapped_coords if q % 2 == 0 else mirrored_coords
+                use_coords = mirrored_coords if (q % 2 == 1) else swapped_coords
             else:
                 use_coords = swapped_coords
+            
             item = spyrrow.Item(
                 id=unique_id,
                 shape=use_coords,
@@ -1374,9 +1375,9 @@ if uploaded_file is not None:
                 key="nest_rotation"
             )
 
-            # 마주 보기 허용 (좌우 미러링)
+            # 좌우 마주 보기 (좌우 미러링)
             nest_mirror = st.checkbox(
-                "마주 보기 허용",
+                "좌우 마주 보기",
                 value=False,
                 help="수량 2개 이상 패턴을 좌우 뒤집어서 마주보게 배치",
                 key="nest_mirror"
