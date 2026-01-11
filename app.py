@@ -34,7 +34,7 @@ except ImportError:
     SPARROW_AVAILABLE = False
 
 
-def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spacing):
+def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spacing, allow_mirror=False):
     """
     Sparrow 네스팅 실행
 
@@ -44,6 +44,7 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         time_limit: 최적화 시간 제한 (초)
         allow_rotation: 180도 회전 허용 여부
         spacing: 패턴 간격 (mm) - cm로 변환하여 적용
+        allow_mirror: 뒤집기(좌우 미러링) 허용 여부
 
     Returns:
         네스팅 결과 딕셔너리
@@ -71,11 +72,15 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         # 회전 옵션
         orientations = [0, 180] if allow_rotation else [0]
 
-        # 수량만큼 아이템 생성 (짝수번째는 원본, 홀수번째는 미러링하여 마주보게 배치)
+        # 수량만큼 아이템 생성
         for q in range(p['quantity']):
             unique_id = f"{p['pattern_id']}_{item_idx}"
-            # 짝수번째(0, 2, 4...)는 원본, 홀수번째(1, 3, 5...)는 미러링
-            use_coords = swapped_coords if q % 2 == 0 else mirrored_coords
+            # 뒤집기 허용 시: 짝수번째는 원본, 홀수번째는 미러링
+            # 뒤집기 비허용 시: 모두 원본
+            if allow_mirror:
+                use_coords = swapped_coords if q % 2 == 0 else mirrored_coords
+            else:
+                use_coords = swapped_coords
             item = spyrrow.Item(
                 id=unique_id,
                 shape=use_coords,
@@ -1369,6 +1374,14 @@ if uploaded_file is not None:
                 key="nest_rotation"
             )
 
+            # 뒤집기 허용 (좌우 미러링)
+            nest_mirror = st.checkbox(
+                "뒤집기 허용",
+                value=False,
+                help="수량 2개 이상 패턴을 좌우 뒤집어서 마주보게 배치",
+                key="nest_mirror"
+            )
+
             # Sparrow 모드 (항상 활성화, UI 숨김)
             use_sparrow = SPARROW_AVAILABLE
 
@@ -1468,7 +1481,7 @@ if uploaded_file is not None:
                         if use_sparrow and SPARROW_AVAILABLE:
                             # Sparrow 네스팅
                             result = run_sparrow_nesting(
-                                pattern_data, width_cm, sparrow_time, nest_rotation, nest_spacing
+                                pattern_data, width_cm, sparrow_time, nest_rotation, nest_spacing, nest_mirror
                             )
                         else:
                             # 기본 네스팅 엔진
@@ -1593,7 +1606,8 @@ if uploaded_file is not None:
                                                             pattern_data, width_cm,
                                                             st.session_state.get('sparrow_time', 30),
                                                             st.session_state.get('nest_rotation', True),
-                                                            st.session_state.get('nest_spacing', 0)
+                                                            st.session_state.get('nest_spacing', 0),
+                                                            st.session_state.get('nest_mirror', False)
                                                         )
                                                     else:
                                                         engine = NestingEngine(
@@ -1689,7 +1703,8 @@ if uploaded_file is not None:
                                             pattern_data, width_cm,
                                             st.session_state.get('sparrow_time', 30),
                                             st.session_state.get('nest_rotation', True),
-                                            st.session_state.get('nest_spacing', 0)
+                                            st.session_state.get('nest_spacing', 0),
+                                            st.session_state.get('nest_mirror', False)
                                         )
                                     else:
                                         engine = NestingEngine(
