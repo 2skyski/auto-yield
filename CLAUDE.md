@@ -154,6 +154,10 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
 
 ## UI 구성
 
+### 초기 화면 (파일 업로드 전)
+- 안내 메시지: "💡 DXF 파일을 업로드하면 패턴 분석이 시작됩니다."
+- 사용 가이드 영상: YouTube 썸네일 + 링크 버튼 (50% 크기, 가운데 정렬)
+
 ### 상단
 - 제목: `👕 스마트 의류 요척 산출서` (1.8rem)
 - DXF 파일 업로더
@@ -230,6 +234,11 @@ fabric_colors = {
    - 한글 폰트 지원 추가 (Malgun Gothic)
    - GA 모드 제거 (Sparrow가 더 효과적)
    - 패턴 간격 기본값 0mm로 변경
+
+8. **UI 개선** (2026-01-11)
+   - 숫자 입력 +/- 버튼 크기 60%로 축소 (40px → 24px)
+   - 초기 화면에 YouTube 사용 가이드 영상 썸네일 및 링크 추가
+   - 영상 ID: `Dn_1IsG8J8Q`
 
 ## 배포
 
