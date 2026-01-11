@@ -1374,9 +1374,9 @@ if uploaded_file is not None:
                 key="nest_rotation"
             )
 
-            # 뒤집기 허용 (좌우 미러링)
+            # 마주 보기 허용 (좌우 미러링)
             nest_mirror = st.checkbox(
-                "뒤집기 허용",
+                "마주 보기 허용",
                 value=False,
                 help="수량 2개 이상 패턴을 좌우 뒤집어서 마주보게 배치",
                 key="nest_mirror"
