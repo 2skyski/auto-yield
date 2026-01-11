@@ -64,10 +64,12 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         # 입력시 X와 Y를 교환하여 Sparrow가 올바르게 처리하도록 함
         swapped_coords = [(y, x) for x, y in coords]
 
-        # 좌우 미러링된 좌표 생성 (X축 반전) - 좌/우 패턴 짝 배치용
-        xs = [c[0] for c in swapped_coords]
-        center_x = (min(xs) + max(xs)) / 2
-        mirrored_coords = [(2 * center_x - x, y) for x, y in swapped_coords]
+        # 좌우 미러링된 좌표 생성 (Y축 반전) - 좌/우 패턴 짝 배치용
+        # Sparrow 좌표계: X=마카길이, Y=원단폭
+        # Y축 반전 = 원단폭 방향으로 뒤집기 = 좌우 마주보기
+        ys = [c[1] for c in swapped_coords]
+        center_y = (min(ys) + max(ys)) / 2
+        mirrored_coords = [(x, 2 * center_y - y) for x, y in swapped_coords]
 
         # 수량만큼 아이템 생성
         for q in range(p['quantity']):
@@ -123,6 +125,20 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         original_shape = item_shapes.get(placed.id, [])
         rotation = placed.rotation
         tx, ty = placed.translation
+
+        # 180도 회전 비허용 시: 180도 회전된 패턴을 원래대로 되돌림
+        # spyrrow가 allowed_orientations=[0]을 무시하는 경우 대응
+        if not allow_rotation and abs(rotation - 180) < 1:
+            rotation = 0
+            # 180도 회전 취소를 위해 translation 보정
+            # 패턴 중심 기준으로 180도 역회전 필요
+            xs = [c[0] for c in original_shape]
+            ys = [c[1] for c in original_shape]
+            cx = (min(xs) + max(xs)) / 2
+            cy = (min(ys) + max(ys)) / 2
+            # 원래 회전 중심에서의 오프셋 계산 후 역보정
+            tx = tx + 2 * cx
+            ty = ty + 2 * cy
 
         # 회전 및 이동 적용하여 최종 좌표 계산
         # Sparrow 좌표계 (입력 교환 후): X=마카길이, Y=원단폭
