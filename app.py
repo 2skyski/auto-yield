@@ -156,9 +156,20 @@ def create_sparrow_visualization(result, sheet_width_cm):
     import matplotlib.patches as patches
     from matplotlib.path import Path
     import matplotlib.font_manager as fm
+    import platform
 
-    # 한글 폰트 설정
-    plt.rcParams['font.family'] = 'Malgun Gothic'  # Windows
+    # 한글 폰트 설정 (크로스 플랫폼)
+    if platform.system() == 'Windows':
+        plt.rcParams['font.family'] = 'Malgun Gothic'
+    else:
+        # Linux: NanumGothic 우선, 없으면 DejaVu Sans
+        available_fonts = [f.name for f in fm.fontManager.ttflist]
+        if 'NanumGothic' in available_fonts:
+            plt.rcParams['font.family'] = 'NanumGothic'
+        elif 'Nanum Gothic' in available_fonts:
+            plt.rcParams['font.family'] = 'Nanum Gothic'
+        else:
+            plt.rcParams['font.family'] = 'DejaVu Sans'
     plt.rcParams['axes.unicode_minus'] = False
 
     if not result.get('success'):
