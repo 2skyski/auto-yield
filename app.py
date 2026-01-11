@@ -307,6 +307,25 @@ st.markdown("""
         font-size: 1rem !important;
         justify-content: center !important;
     }
+
+    /* file_uploader 드래그앤드롭 영역 스타일 강화 */
+    [data-testid="stFileUploader"],
+    .stFileUploader {
+        border: 3px dashed #0068c9 !important;
+        border-radius: 15px !important;
+        padding: 15px !important;
+        background: linear-gradient(135deg, #f0f7ff 0%, #e8f4f8 100%) !important;
+    }
+    [data-testid="stFileUploader"] label,
+    .stFileUploader label {
+        font-size: 16px !important;
+        font-weight: bold !important;
+        color: #0068c9 !important;
+    }
+    [data-testid="stFileUploader"] small,
+    .stFileUploader small {
+        font-size: 13px !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -845,7 +864,11 @@ if "df" not in st.session_state: st.session_state.df = None
 if "patterns" not in st.session_state: st.session_state.patterns = None
 
 # A. 파일 업로드 섹션
-uploaded_file = st.file_uploader("DXF 파일을 업로드하세요 (YUKA, Optitex 등)", type=["dxf"])
+uploaded_file = st.file_uploader(
+    "📁 DXF 파일을 여기에 드래그하거나 클릭하여 선택하세요",
+    type=["dxf"],
+    help="지원 형식: YUKA, Optitex, Gerber 등"
+)
 
 if uploaded_file is not None:
     # 최초 로드시 패턴 분석 실행
@@ -1240,64 +1263,59 @@ if uploaded_file is not None:
                 use_container_width=True
             )
 
-            # ----------------------------------------------------------------
-            # F. 네스팅 시뮬레이션 (원단별)
-            # ----------------------------------------------------------------
-            st.divider()
-            st.markdown("#### 🧩 네스팅 시뮬레이션")
-            st.caption("원단별로 개별 네스팅을 실행합니다.")
+        # ----------------------------------------------------------------
+        # F. 네스팅 시뮬레이션 (원단별) - 전체 폭 사용
+        # ----------------------------------------------------------------
+        st.divider()
+        st.markdown("#### 🧩 네스팅 시뮬레이션")
 
-            # 원단별 설정
-            fabric_list = st.session_state.df['원단'].unique().tolist()
+        # 원단별 설정
+        fabric_list = st.session_state.df['원단'].unique().tolist()
+        fabric_widths = {}
+        marker_quantities = {}
+        target_efficiencies = {}
 
+        # 2컬럼 레이아웃: 왼쪽(공통설정) | 오른쪽(180도회전 + 원단별설정)
+        left_col, right_col = st.columns(2)
+
+        with left_col:
             # 공통 설정
-            common_col1, common_col2 = st.columns(2)
-            with common_col1:
-                nest_spacing = st.number_input(
-                    "패턴 간격 (mm)",
-                    min_value=0, max_value=50, value=0,
-                    help="패턴 사이의 간격",
-                    key="nest_spacing"
+            nest_spacing = st.number_input(
+                "패턴 간격 (mm)",
+                min_value=0, max_value=50, value=0,
+                help="패턴 사이의 간격",
+                key="nest_spacing"
+            )
+
+            # 180도 회전 허용
+            nest_rotation = st.checkbox(
+                "180도 회전 허용",
+                value=True,
+                help="패턴을 180도 회전하여 배치",
+                key="nest_rotation"
+            )
+
+            # Sparrow 모드 (항상 활성화, UI 숨김)
+            use_sparrow = SPARROW_AVAILABLE
+
+            if use_sparrow:
+                sparrow_time = st.number_input(
+                    "최적화 시간(초)",
+                    min_value=5, max_value=120, value=30,
+                    help="더 긴 시간 = 더 좋은 결과",
+                    key="sparrow_time"
                 )
-            with common_col2:
-                nest_rotation = st.checkbox(
-                    "180도 회전 허용",
-                    value=True,
-                    help="패턴을 180도 회전하여 배치",
-                    key="nest_rotation"
-                )
+            else:
+                sparrow_time = 30
 
-            # Sparrow 모드 옵션 (State-of-the-art 네스팅)
-            sparrow_col1, sparrow_col2 = st.columns(2)
-            with sparrow_col1:
-                if SPARROW_AVAILABLE:
-                    use_sparrow = st.checkbox(
-                        "🐦 Sparrow 최적화",
-                        value=True,
-                        help="State-of-the-art 네스팅 (더 빠르고 효율적)",
-                        key="use_sparrow"
-                    )
-                else:
-                    st.caption("⚠️ Sparrow 미설치")
-                    use_sparrow = False
-            with sparrow_col2:
-                if use_sparrow:
-                    sparrow_time = st.number_input(
-                        "최적화 시간(초)",
-                        min_value=5, max_value=120, value=30,
-                        help="더 긴 시간 = 더 좋은 결과",
-                        key="sparrow_time"
-                    )
-                else:
-                    sparrow_time = 30
+            # 네스팅 실행 버튼
+            run_nesting = st.button("🚀 네스팅 실행", use_container_width=True, type="primary")
+            if 'nesting_elapsed' in st.session_state:
+                st.caption(f"⏱️ {st.session_state.nesting_elapsed:.1f}초")
 
-            # 원단별 폭, 목표효율, 마카 벌수 설정
-            fabric_widths = {}
-            marker_quantities = {}
-            target_efficiencies = {}
+        with right_col:
 
-            st.caption("원단별 설정:")
-            # 헤더 행
+            # 원단별 설정 헤더
             hcol1, hcol2, hcol3 = st.columns([2, 1, 1])
             with hcol1:
                 st.markdown("**원단**")
@@ -1306,6 +1324,7 @@ if uploaded_file is not None:
             with hcol3:
                 st.markdown("**벌수**")
 
+            # 원단별 설정 입력
             for i, fabric in enumerate(fabric_list):
                 # 요척 결과에서 설정한 폭과 단위 가져오기
                 width_val = st.session_state.get(f"w{i}", 58.0)
@@ -1317,10 +1336,9 @@ if uploaded_file is not None:
                     width_cm = width_val
                 fabric_widths[fabric] = width_cm
 
-                # 원단별 설정 입력 (폭 표시 + 목표효율 + 벌수)
                 col1, col2, col3 = st.columns([2, 1, 1])
                 with col1:
-                    st.text(f"{fabric}: 폭 {width_cm:.1f}cm")
+                    st.text(f"{fabric}: {width_cm:.1f}cm")
                 with col2:
                     target_efficiencies[fabric] = st.number_input(
                         "효율%",
@@ -1336,144 +1354,346 @@ if uploaded_file is not None:
                         label_visibility="collapsed"
                     )
 
-            # 네스팅 실행 버튼 + 실행시간 표시
-            btn_col, time_col = st.columns([4, 1])
-            with btn_col:
-                run_nesting = st.button("🚀 네스팅 실행", use_container_width=True, type="primary")
-            with time_col:
-                if 'nesting_elapsed' in st.session_state:
-                    st.markdown(f"<p style='text-align:center; margin-top:5px;'>⏱️ {st.session_state.nesting_elapsed:.1f}초</p>", unsafe_allow_html=True)
+        if run_nesting:
+            import time
+            start_time = time.time()
+            spinner_msg = "🐦 Sparrow 최적화 중..." if use_sparrow else "원단별 네스팅 계산 중..."
+            with st.spinner(spinner_msg):
+                try:
+                    nesting_results = {}
 
-            if run_nesting:
-                import time
-                start_time = time.time()
-                spinner_msg = "🐦 Sparrow 최적화 중..." if use_sparrow else "원단별 네스팅 계산 중..."
-                with st.spinner(spinner_msg):
-                    try:
-                        nesting_results = {}
+                    # 원단별로 네스팅 실행
+                    for fabric in fabric_list:
+                        # 해당 원단의 패턴만 필터링
+                        fabric_df = st.session_state.df[st.session_state.df['원단'] == fabric]
+                        fabric_indices = fabric_df.index.tolist()
 
-                        # 원단별로 네스팅 실행
-                        for fabric in fabric_list:
-                            # 해당 원단의 패턴만 필터링
-                            fabric_df = st.session_state.df[st.session_state.df['원단'] == fabric]
-                            fabric_indices = fabric_df.index.tolist()
+                        if len(fabric_indices) == 0:
+                            continue
 
-                            if len(fabric_indices) == 0:
-                                continue
+                        # 패턴 데이터 수집
+                        fabric_marker_qty = marker_quantities.get(fabric, 1)
+                        pattern_data = []
+                        for idx in fabric_indices:
+                            if idx < len(patterns):
+                                row = st.session_state.df.loc[idx]
+                                poly = patterns[idx][0]
+                                coords = list(poly.exterior.coords)[:-1]
+                                coords_cm = [(p[0] / 10, p[1] / 10) for p in coords]
+                                quantity = int(row['수량']) * fabric_marker_qty
+                                pattern_id = str(row['구분'])[:10] if row['구분'] else f"P{idx+1}"
+                                pattern_data.append({
+                                    'coords_cm': coords_cm,
+                                    'quantity': quantity,
+                                    'pattern_id': pattern_id,
+                                    'area_cm2': poly.area / 100
+                                })
 
-                            # 패턴 데이터 수집
-                            fabric_marker_qty = marker_quantities.get(fabric, 1)
-                            pattern_data = []
-                            for idx in fabric_indices:
-                                if idx < len(patterns):
-                                    row = st.session_state.df.loc[idx]
-                                    poly = patterns[idx][0]
-                                    coords = list(poly.exterior.coords)[:-1]
-                                    coords_cm = [(p[0] / 10, p[1] / 10) for p in coords]
-                                    quantity = int(row['수량']) * fabric_marker_qty
-                                    pattern_id = str(row['구분'])[:10] if row['구분'] else f"P{idx+1}"
-                                    pattern_data.append({
-                                        'coords_cm': coords_cm,
-                                        'quantity': quantity,
-                                        'pattern_id': pattern_id,
-                                        'area_cm2': poly.area / 100
-                                    })
+                        width_cm = fabric_widths[fabric]
 
-                            width_cm = fabric_widths[fabric]
-
-                            if use_sparrow and SPARROW_AVAILABLE:
-                                # Sparrow 네스팅
-                                result = run_sparrow_nesting(
-                                    pattern_data, width_cm, sparrow_time, nest_rotation, nest_spacing
-                                )
-                            else:
-                                # 기본 네스팅 엔진
-                                fabric_target_eff = target_efficiencies.get(fabric, 80)
-                                engine = NestingEngine(
-                                    sheet_width=width_cm * 10,
-                                    spacing=nest_spacing,
-                                    target_efficiency=fabric_target_eff
-                                )
-                                for p in pattern_data:
-                                    engine.add_pattern(
-                                        list(p['coords_cm']),
-                                        quantity=p['quantity'],
-                                        pattern_id=p['pattern_id']
-                                    )
-                                rotations = [0, 180] if nest_rotation else [0]
-                                result = engine.run(rotations=rotations)
-
-                            result['fabric'] = fabric
-                            result['width_cm'] = width_cm
-                            result['marker_quantity'] = fabric_marker_qty
-                            nesting_results[fabric] = result
-
-                        # 결과 저장 (작업일시 + 실행시간 추가)
-                        from datetime import datetime
-                        st.session_state.nesting_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-                        st.session_state.nesting_elapsed = time.time() - start_time
-                        st.session_state.nesting_results = nesting_results
-                        st.rerun()
-
-                    except Exception as e:
-                        st.error(f"네스팅 오류: {str(e)}")
-                        import traceback
-                        st.code(traceback.format_exc())
-
-            # 네스팅 결과 표시 (원단별)
-            if 'nesting_results' in st.session_state and st.session_state.nesting_results:
-                results = st.session_state.nesting_results
-
-                for fabric, result in results.items():
-                    color = get_fabric_color_hex(fabric)
-
-                    marker_qty = result.get('marker_quantity', 1)
-                    timestamp = st.session_state.get('nesting_timestamp', '')
-                    with st.expander(f"📦 {fabric} ({marker_qty}벌) - {timestamp}", expanded=True):
-                        if result['success']:
-                            # 결과 메트릭 (5열: 패턴수, 원단폭, 마카길이, 요척, 효율)
-                            m1, m2, m3, m4, m5 = st.columns([1, 1, 1.2, 1, 0.8])
-                            m1.metric("패턴수", f"{result['placed_count']}/{result['total_count']}")
-                            m2.metric("원단폭", f"{result['width_cm']:.0f} cm")
-                            m3.metric("마카길이", f"{result['used_length_cm']:.1f} cm")
-                            # 요척 = 마카길이(YD) / 벌수
-                            yield_per_set = result['used_length_yd'] / marker_qty
-                            m4.metric("요척", f"{yield_per_set:.2f} YD")
-                            m5.metric("효율", f"{result['efficiency']}%")
-
-                            # 시각화
-                            try:
-                                if result.get('sparrow_mode'):
-                                    fig = create_sparrow_visualization(result, result['width_cm'])
-                                else:
-                                    fig = create_nesting_visualization(result, result['width_cm'])
-                                if fig:
-                                    st.pyplot(fig)
-                                    plt.close(fig)
-                            except Exception as e:
-                                st.warning(f"시각화 오류: {str(e)}")
+                        if use_sparrow and SPARROW_AVAILABLE:
+                            # Sparrow 네스팅
+                            result = run_sparrow_nesting(
+                                pattern_data, width_cm, sparrow_time, nest_rotation, nest_spacing
+                            )
                         else:
-                            st.warning(f"{fabric}: 패턴을 배치할 수 없습니다.")
+                            # 기본 네스팅 엔진
+                            fabric_target_eff = target_efficiencies.get(fabric, 80)
+                            engine = NestingEngine(
+                                sheet_width=width_cm * 10,
+                                spacing=nest_spacing,
+                                target_efficiency=fabric_target_eff
+                            )
+                            for p in pattern_data:
+                                engine.add_pattern(
+                                    list(p['coords_cm']),
+                                    quantity=p['quantity'],
+                                    pattern_id=p['pattern_id']
+                                )
+                            rotations = [0, 180] if nest_rotation else [0]
+                            result = engine.run(rotations=rotations)
 
-                # 네스팅 결과 엑셀 내보내기
-                st.markdown("---")
-                excel_data = export_nesting_to_excel(results, st.session_state.get('nesting_timestamp', ''))
-                if excel_data:
-                    timestamp_safe = st.session_state.get('nesting_timestamp', '').replace(':', '-').replace(' ', '_')
-                    st.download_button(
-                        label="📥 네스팅 결과 엑셀 다운로드",
-                        data=excel_data,
-                        file_name=f"네스팅결과_{timestamp_safe}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
+                        result['fabric'] = fabric
+                        result['width_cm'] = width_cm
+                        result['marker_quantity'] = fabric_marker_qty
+                        nesting_results[fabric] = result
+
+                    # 결과 저장 (작업일시 + 실행시간 추가)
+                    from datetime import datetime
+                    st.session_state.nesting_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    st.session_state.nesting_elapsed = time.time() - start_time
+                    st.session_state.nesting_results = nesting_results
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"네스팅 오류: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+        # 네스팅 결과 표시 (원단별 - 2열 배치)
+        if 'nesting_results' in st.session_state and st.session_state.nesting_results:
+            results = st.session_state.nesting_results
+            fabric_list_results = list(results.keys())
+
+            # 2열로 배치
+            for i in range(0, len(fabric_list_results), 2):
+                cols = st.columns(2)
+
+                for j, col in enumerate(cols):
+                    if i + j < len(fabric_list_results):
+                        fabric = fabric_list_results[i + j]
+                        result = results[fabric]
+                        color = get_fabric_color_hex(fabric)
+                        marker_qty = result.get('marker_quantity', 1)
+                        timestamp = st.session_state.get('nesting_timestamp', '')
+
+                        with col:
+                            with st.expander(f"📦 {fabric} ({marker_qty}벌) - {timestamp}", expanded=True):
+                                if result['success']:
+                                    # 결과 메트릭 (5열: 패턴수, 원단폭, 마카길이, 요척, 효율)
+                                    m1, m2, m3, m4, m5 = st.columns([1, 1, 1.2, 1, 0.8])
+                                    m1.metric("패턴수", f"{result['placed_count']}/{result['total_count']}")
+                                    m2.metric("원단폭", f"{result['width_cm']:.0f} cm")
+                                    m3.metric("마카길이", f"{result['used_length_cm']:.1f} cm")
+                                    # 요척 = 마카길이(YD) / 벌수
+                                    yield_per_set = result['used_length_yd'] / marker_qty
+                                    m4.metric("요척", f"{yield_per_set:.2f} YD")
+                                    m5.metric("효율", f"{result['efficiency']}%")
+
+                                    # 시각화
+                                    try:
+                                        if result.get('sparrow_mode'):
+                                            fig = create_sparrow_visualization(result, result['width_cm'])
+                                        else:
+                                            fig = create_nesting_visualization(result, result['width_cm'])
+                                        if fig:
+                                            st.pyplot(fig)
+                                            plt.close(fig)
+                                    except Exception as e:
+                                        st.warning(f"시각화 오류: {str(e)}")
+
+                                    # 재네스팅 옵션
+                                    st.markdown("---")
+                                    re_col1, re_col2 = st.columns([1, 1])
+                                    with re_col1:
+                                        new_qty = st.number_input(
+                                            "벌수 변경",
+                                            min_value=1, max_value=10,
+                                            value=marker_qty,
+                                            key=f"re_qty_{fabric}_{i+j}"
+                                        )
+                                    with re_col2:
+                                        if st.button("🔄 재네스팅", key=f"re_nest_{fabric}_{i+j}", use_container_width=True):
+                                            # 해당 원단만 재네스팅
+                                            with st.spinner(f"🐦 {fabric} 재네스팅 중..."):
+                                                try:
+                                                    import time
+                                                    start_time = time.time()
+
+                                                    # 해당 원단의 패턴만 필터링
+                                                    fabric_df = st.session_state.df[st.session_state.df['원단'] == fabric]
+                                                    fabric_indices = fabric_df.index.tolist()
+
+                                                    # 패턴 데이터 수집
+                                                    pattern_data = []
+                                                    for idx in fabric_indices:
+                                                        if idx < len(patterns):
+                                                            row = st.session_state.df.loc[idx]
+                                                            poly = patterns[idx][0]
+                                                            coords = list(poly.exterior.coords)[:-1]
+                                                            coords_cm = [(p[0] / 10, p[1] / 10) for p in coords]
+                                                            quantity = int(row['수량']) * new_qty
+                                                            pattern_id = str(row['구분'])[:10] if row['구분'] else f"P{idx+1}"
+                                                            pattern_data.append({
+                                                                'coords_cm': coords_cm,
+                                                                'quantity': quantity,
+                                                                'pattern_id': pattern_id,
+                                                                'area_cm2': poly.area / 100
+                                                            })
+
+                                                    width_cm = result['width_cm']
+
+                                                    # Sparrow 네스팅 실행
+                                                    if SPARROW_AVAILABLE:
+                                                        new_result = run_sparrow_nesting(
+                                                            pattern_data, width_cm,
+                                                            st.session_state.get('sparrow_time', 30),
+                                                            st.session_state.get('nest_rotation', True),
+                                                            st.session_state.get('nest_spacing', 0)
+                                                        )
+                                                    else:
+                                                        engine = NestingEngine(
+                                                            sheet_width=width_cm * 10,
+                                                            spacing=st.session_state.get('nest_spacing', 0),
+                                                            target_efficiency=80
+                                                        )
+                                                        for p in pattern_data:
+                                                            engine.add_pattern(
+                                                                list(p['coords_cm']),
+                                                                quantity=p['quantity'],
+                                                                pattern_id=p['pattern_id']
+                                                            )
+                                                        rotations = [0, 180] if st.session_state.get('nest_rotation', True) else [0]
+                                                        new_result = engine.run(rotations=rotations)
+
+                                                    new_result['fabric'] = fabric
+                                                    new_result['width_cm'] = width_cm
+                                                    new_result['marker_quantity'] = new_qty
+
+                                                    # 결과 업데이트
+                                                    st.session_state.nesting_results[fabric] = new_result
+                                                    st.session_state.nesting_elapsed = time.time() - start_time
+                                                    from datetime import datetime
+                                                    st.session_state.nesting_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                                                    st.rerun()
+
+                                                except Exception as e:
+                                                    st.error(f"재네스팅 오류: {str(e)}")
+                                else:
+                                    st.warning(f"{fabric}: 패턴을 배치할 수 없습니다.")
+
+            # 자동 최적화 버튼 (효율 70% 미만 원단 자동 벌수 조정)
+            st.markdown("---")
+            low_eff_fabrics = [f for f, r in results.items() if r.get('success') and r.get('efficiency', 0) < 70]
+
+            opt_col1, opt_col2 = st.columns([1, 1])
+            with opt_col1:
+                if low_eff_fabrics:
+                    st.caption(f"⚠️ 효율 70% 미만: {', '.join(low_eff_fabrics)}")
+                else:
+                    st.caption("✅ 모든 원단 효율 70% 이상")
+
+            with opt_col2:
+                if st.button("🎯 자동 최적화", use_container_width=True, disabled=len(low_eff_fabrics)==0):
+                    with st.spinner("🔄 효율 70% 미만 원단 자동 최적화 중..."):
+                        try:
+                            import time
+                            start_time = time.time()
+                            optimized_count = 0
+
+                            for fabric in low_eff_fabrics:
+                                original_result = results[fabric]
+                                width_cm = original_result['width_cm']
+                                original_qty = original_result.get('marker_quantity', 1)
+                                best_result = original_result
+                                best_efficiency = original_result.get('efficiency', 0)
+                                best_qty = original_qty
+
+                                # 해당 원단의 패턴 데이터 준비
+                                fabric_df = st.session_state.df[st.session_state.df['원단'] == fabric]
+                                fabric_indices = fabric_df.index.tolist()
+
+                                base_pattern_data = []
+                                for idx in fabric_indices:
+                                    if idx < len(patterns):
+                                        row = st.session_state.df.loc[idx]
+                                        poly = patterns[idx][0]
+                                        coords = list(poly.exterior.coords)[:-1]
+                                        coords_cm = [(p[0] / 10, p[1] / 10) for p in coords]
+                                        pattern_id = str(row['구분'])[:10] if row['구분'] else f"P{idx+1}"
+                                        base_pattern_data.append({
+                                            'coords_cm': coords_cm,
+                                            'base_quantity': int(row['수량']),
+                                            'pattern_id': pattern_id,
+                                            'area_cm2': poly.area / 100
+                                        })
+
+                                # 벌수 2~5까지 시도하여 최적 효율 찾기
+                                for try_qty in range(2, 6):
+                                    pattern_data = []
+                                    for p in base_pattern_data:
+                                        pattern_data.append({
+                                            'coords_cm': p['coords_cm'],
+                                            'quantity': p['base_quantity'] * try_qty,
+                                            'pattern_id': p['pattern_id'],
+                                            'area_cm2': p['area_cm2']
+                                        })
+
+                                    # 네스팅 실행
+                                    if SPARROW_AVAILABLE:
+                                        test_result = run_sparrow_nesting(
+                                            pattern_data, width_cm,
+                                            st.session_state.get('sparrow_time', 30),
+                                            st.session_state.get('nest_rotation', True),
+                                            st.session_state.get('nest_spacing', 0)
+                                        )
+                                    else:
+                                        engine = NestingEngine(
+                                            sheet_width=width_cm * 10,
+                                            spacing=st.session_state.get('nest_spacing', 0),
+                                            target_efficiency=80
+                                        )
+                                        for p in pattern_data:
+                                            engine.add_pattern(
+                                                list(p['coords_cm']),
+                                                quantity=p['quantity'],
+                                                pattern_id=p['pattern_id']
+                                            )
+                                        rotations = [0, 180] if st.session_state.get('nest_rotation', True) else [0]
+                                        test_result = engine.run(rotations=rotations)
+
+                                    test_eff = test_result.get('efficiency', 0)
+
+                                    # 더 좋은 효율이면 저장
+                                    if test_eff > best_efficiency:
+                                        best_efficiency = test_eff
+                                        best_result = test_result
+                                        best_qty = try_qty
+
+                                    # 목표 효율(80%) 이상이면 중단
+                                    if test_eff >= 80:
+                                        break
+
+                                # 최적 결과로 업데이트
+                                if best_qty != original_qty:
+                                    best_result['fabric'] = fabric
+                                    best_result['width_cm'] = width_cm
+                                    best_result['marker_quantity'] = best_qty
+                                    st.session_state.nesting_results[fabric] = best_result
+                                    optimized_count += 1
+
+                            st.session_state.nesting_elapsed = time.time() - start_time
+                            from datetime import datetime
+                            st.session_state.nesting_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+                            if optimized_count > 0:
+                                st.success(f"✅ {optimized_count}개 원단 최적화 완료!")
+                                st.rerun()
+                            else:
+                                st.info("최적화할 원단이 없습니다.")
+
+                        except Exception as e:
+                            st.error(f"자동 최적화 오류: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
+
+            # 네스팅 결과 엑셀 내보내기
+            st.markdown("---")
+            excel_data = export_nesting_to_excel(results, st.session_state.get('nesting_timestamp', ''))
+            if excel_data:
+                timestamp_safe = st.session_state.get('nesting_timestamp', '').replace(':', '-').replace(' ', '_')
+                st.download_button(
+                    label="📥 네스팅 결과 엑셀 다운로드",
+                    data=excel_data,
+                    file_name=f"네스팅결과_{timestamp_safe}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
 
     else:
         st.info("💡 DXF 파일을 업로드하면 패턴 분석이 시작됩니다.")
 
 else:
     # 초기 화면 (파일 업로드 전)
-    st.info("💡 DXF 파일을 업로드하면 패턴 분석이 시작됩니다.")
+    # 안내 문구
+    st.markdown('''
+    <div style="text-align: center; padding: 20px; background: #fffbe6; border-radius: 10px; border: 1px solid #ffe58f;">
+        <p style="font-size: 16px; color: #d48806; font-weight: bold; margin: 0;">
+            ⬆️ 위의 "Browse files" 버튼을 클릭하거나, 그 영역에 DXF 파일을 드래그하세요
+        </p>
+    </div>
+    ''', unsafe_allow_html=True)
+
     # 50% 크기로 가운데 배치
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
