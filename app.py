@@ -26,6 +26,13 @@ import base64
 # 네스팅 엔진 임포트
 from nesting_engine import NestingEngine, create_nesting_visualization
 
+# 형상 시그니처 DB (수량 추천/학습)
+try:
+    from pattern_db import PatternDB
+    PATTERN_DB_AVAILABLE = True
+except ImportError:
+    PATTERN_DB_AVAILABLE = False
+
 # Sparrow 네스팅 (State-of-the-art)
 try:
     import spyrrow
@@ -236,11 +243,17 @@ def create_sparrow_visualization(result, sheet_width_cm):
             color = pattern_color_map.get(pattern_name, colors[0])
             ax.fill(xs, ys, alpha=0.7, facecolor=color, edgecolor='black', linewidth=0.5)
 
-            # 패턴 ID 표시
-            cx = sum(xs) / len(xs)
-            cy = sum(ys) / len(ys)
-            label = pattern_name[:6]
-            ax.text(cx, cy, label, ha='center', va='center', fontsize=6, fontweight='bold')
+            # 패턴 ID 표시 (중심점 계산 - Shapely centroid 사용)
+            from shapely.geometry import Polygon as ShapelyPoly
+            try:
+                poly_shape = ShapelyPoly(coords)
+                centroid = poly_shape.centroid
+                cx, cy = centroid.x, centroid.y
+            except:
+                cx = sum(xs) / len(xs)
+                cy = sum(ys) / len(ys)
+            label = pattern_name[:16]  # 사이즈 정보 포함
+            ax.text(cx, cy, label, ha='center', va='center', fontsize=4, fontweight='bold')
 
     ax.set_xlim(-1, sheet_width_cm + 1)
     ax.set_ylim(-1, used_length_cm + 1)
@@ -335,17 +348,22 @@ st.markdown("""
         font-weight: bold !important;
     }
 
-    /* 네스팅 결과 메트릭 값 크기 50% 축소 + 가운데 정렬 */
+    /* 네스팅 결과 메트릭 - 제목/데이터 모두 가운데 정렬 */
     div[data-testid="stExpander"] div[data-testid="stMetric"] {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
         text-align: center !important;
     }
     div[data-testid="stExpander"] div[data-testid="stMetric"] label {
         font-size: 0.7rem !important;
-        justify-content: center !important;
+        width: 100% !important;
+        text-align: center !important;
     }
     div[data-testid="stExpander"] div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
         font-size: 1rem !important;
-        justify-content: center !important;
+        width: 100% !important;
+        text-align: center !important;
     }
 
     /* file_uploader 드래그앤드롭 영역 스타일 강화 */
@@ -608,6 +626,108 @@ def poly_to_base64(poly, fill_color='gray'):
     return f"data:image/png;base64,{data}"
 
 
+def create_overlay_visualization(patterns_group, selected_sizes, all_sizes):
+    """
+    동일 패턴 그룹의 여러 사이즈를 중첩하여 시각화
+    - 바탕색 없이 외곽선만 표시
+    - 사이즈별 다른 색상 외곽선
+    - 중심 정렬로 크기 비교
+
+    Args:
+        patterns_group: [(poly, pattern_name, fabric_name, size_name, pattern_group), ...] 동일 그룹
+        selected_sizes: 선택된 사이즈 목록
+        all_sizes: 전체 사이즈 목록
+
+    Returns:
+        matplotlib figure
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.lines as mlines
+
+    fig, ax = plt.subplots(figsize=(4, 4))
+
+    # 사이즈별 색상 (파랑→빨강 그라데이션)
+    size_colors = {}
+    cmap = plt.cm.get_cmap('coolwarm', len(all_sizes) + 1)
+    for i, size in enumerate(all_sizes):
+        size_colors[size] = cmap(i / max(len(all_sizes) - 1, 1))
+
+    # 모든 패턴의 경계 계산 (중심 맞추기용)
+    all_bounds = []
+    for p_data in patterns_group:
+        poly = p_data[0]  # 첫 번째 요소가 poly
+        all_bounds.append(poly.bounds)
+
+    if not all_bounds:
+        return fig
+
+    # 전체 영역 계산
+    min_x = min(b[0] for b in all_bounds)
+    min_y = min(b[1] for b in all_bounds)
+    max_x = max(b[2] for b in all_bounds)
+    max_y = max(b[3] for b in all_bounds)
+
+    center_x = (min_x + max_x) / 2
+    center_y = (min_y + max_y) / 2
+
+    # 사이즈 순서대로 그리기 (큰 것부터)
+    sorted_patterns = sorted(patterns_group, key=lambda x: x[0].area, reverse=True)
+
+    legend_handles = []
+    drawn_sizes = set()
+
+    for p_data in sorted_patterns:
+        poly = p_data[0]
+        size_name = p_data[3]  # 4번째 요소
+
+        if not size_name:
+            continue
+
+        # 중심점으로 이동 (중심 정렬)
+        poly_center = poly.centroid
+        dx = center_x - poly_center.x
+        dy = center_y - poly_center.y
+        moved_poly = affinity.translate(poly, xoff=dx, yoff=dy)
+
+        x, y = moved_poly.exterior.xy
+
+        # 사이즈별 색상
+        color = size_colors.get(size_name, 'gray')
+        is_selected = size_name in selected_sizes
+
+        # 선택된 사이즈: 실선 (더 두껍게), 미선택: 점선+흐리게
+        if is_selected:
+            ax.plot(x, y, color=color, linewidth=1.5, linestyle='-', alpha=1.0)
+        else:
+            ax.plot(x, y, color=color, linewidth=0.8, linestyle='--', alpha=0.4)
+
+        # 범례용 핸들 (사이즈당 하나만)
+        if size_name not in drawn_sizes:
+            drawn_sizes.add(size_name)
+            line = mlines.Line2D([], [], color=color,
+                                 linewidth=1.5 if is_selected else 0.8,
+                                 linestyle='-' if is_selected else '--',
+                                 alpha=1.0 if is_selected else 0.5,
+                                 label=size_name)
+            legend_handles.append(line)
+
+    # 축 설정
+    margin = max(max_x - min_x, max_y - min_y) * 0.15
+    ax.set_xlim(min_x - margin, max_x + margin)
+    ax.set_ylim(min_y - margin, max_y + margin)
+    ax.set_aspect('equal')
+    ax.axis('off')
+
+    # 범례 (사이즈 순서대로)
+    if legend_handles:
+        sorted_handles = sorted(legend_handles, key=lambda x: x.get_label())
+        ax.legend(handles=sorted_handles, loc='upper right', fontsize=8,
+                  framealpha=0.9, handlelength=2.0)
+
+    plt.tight_layout()
+    return fig
+
+
 def check_symmetry(poly):
     """
     패턴의 대칭 여부를 판단합니다. (좌우대칭 or 상하대칭)
@@ -733,9 +853,11 @@ def extract_style_no(file_path):
 @st.cache_data
 def process_dxf(file_path):
     """
-    DXF 파일을 읽어 (Polygon, 패턴이름, 원단명) 튜플 리스트를 반환합니다.
+    DXF 파일을 읽어 (Polygon, 패턴이름, 원단명, 사이즈) 튜플 리스트를 반환합니다.
     블록(INSERT) 기반으로 처리하여 패턴 누락을 방지합니다.
     """
+    import re
+
     try:
         # 한글 인코딩(CP949) 우선 시도
         try:
@@ -770,6 +892,19 @@ def process_dxf(file_path):
                     max_area = 0
                     pattern_name = ""
                     fabric_name = ""  # 원단명 추출용
+                    size_name = ""    # 사이즈 추출용
+                    pattern_group = ""  # 패턴 그룹 번호 (블록명에서 추출)
+
+                    # 블록명에서 패턴그룹/사이즈 추출 (예: BLK_1_0X → 그룹:1, 사이즈:0X)
+                    block_parts = block_name.split('_')
+                    if len(block_parts) >= 2:
+                        # 패턴 그룹 번호 추출 (예: BLK_1_0X → "1")
+                        pattern_group = block_parts[1] if block_parts[1].isdigit() else ""
+                    if len(block_parts) >= 3:
+                        potential_size = block_parts[-1]
+                        # 사이즈 패턴: S, M, L, XS, XL, XXL, 2XL, 3XL, 0X, 1X, 00X, 85, 90 등
+                        if re.match(r'^([0-9]*X{1,2}L?|[SML]|XS|\d{2,3})$', potential_size, re.IGNORECASE):
+                            size_name = potential_size
 
                     # 블록 내 가장 큰 닫힌 POLYLINE 선택 + 텍스트 추출
                     for be in block:
@@ -792,8 +927,14 @@ def process_dxf(file_path):
                         elif be.dxftype() == 'TEXT':
                             text = be.dxf.text
 
+                            # SIZE 필드에서 사이즈 추출
+                            if text.startswith('SIZE:'):
+                                size_val = text.replace('SIZE:', '').strip()
+                                if size_val:
+                                    size_name = size_val
+
                             # CATEGORY 필드에서 원단명 추출
-                            if text.startswith('CATEGORY:'):
+                            elif text.startswith('CATEGORY:'):
                                 cat_val = text.replace('CATEGORY:', '').strip()
                                 if cat_val:
                                     # 매핑된 원단명 찾기
@@ -818,24 +959,28 @@ def process_dxf(file_path):
                                         fabric_name = fabric_map[val_upper]
                                     continue
 
-                                # 제외 대상 체크
-                                # 1. 사이즈 호칭: <S>, <M>, <L> 등
-                                if val.startswith('<'):
+                                # 사이즈 호칭 추출: <S>, <M>, <L>, <0X> 등
+                                if val.startswith('<') and val.endswith('>'):
+                                    extracted_size = val[1:-1].strip()
+                                    if extracted_size and not size_name:
+                                        size_name = extracted_size
                                     continue
-                                # 2. 스타일 번호: S/#..., M/#... 등
+
+                                # 제외 대상 체크
+                                # 스타일 번호: S/#..., M/#... 등
                                 if val.startswith(('S/', 'M/', 'L/', '#')):
                                     continue
-                                # 3. 숫자만 (사이즈: 130, 80 등)
+                                # 숫자만 (사이즈: 130, 80 등)
                                 if val.isdigit():
                                     continue
-                                # 4. 숫자로 시작 (스타일명: 35717요척 등)
+                                # 숫자로 시작 (스타일명: 35717요척 등)
                                 if val[0].isdigit():
                                     continue
-                                # 5. 원단명 (이미 위에서 처리됨)
+                                # 원단명 (이미 위에서 처리됨)
                                 fabric_keywords = ['LINING', 'SHELL', 'INTERLINING', '안감', '겉감', '심지']
                                 if val.upper() in [f.upper() for f in fabric_keywords]:
                                     continue
-                                # 6. 배색 관련
+                                # 배색 관련
                                 if '배색' in val:
                                     continue
                                 # 한글 부위명 우선 (한글이 포함되면 우선 선택)
@@ -851,7 +996,7 @@ def process_dxf(file_path):
 
                     # 30cm² 이상인 패턴만 추가
                     if max_poly and (max_area / 100) > 30:
-                        final.append((max_poly, pattern_name, fabric_name))
+                        final.append((max_poly, pattern_name, fabric_name, size_name, pattern_group))
                 except:
                     pass
 
@@ -893,12 +1038,12 @@ def process_dxf(file_path):
             candidates = [p for p in raw_polys if (p.area / 100) > 30]
             candidates.sort(key=lambda x: x.area, reverse=True)
 
-            # 레거시 방식에서만 중복 제거 (패턴 이름/원단명 없음 → 기본값)
+            # 레거시 방식에서만 중복 제거 (패턴 이름/원단명/사이즈/그룹 없음 → 기본값)
             added_polys = []
-            for p in candidates:
+            for idx, p in enumerate(candidates):
                 if not any(p.centroid.distance(e.centroid) < 50 for e in added_polys):
                     added_polys.append(p)
-                    final.append((p, "", "겉감"))  # 원단명 기본값: 겉감
+                    final.append((p, "", "겉감", "", str(idx + 1)))  # 원단명 기본값: 겉감, 그룹: 순번
 
         # 면적 기준 정렬 (큰 것부터)
         final.sort(key=lambda x: x[0].area, reverse=True)
@@ -958,6 +1103,7 @@ def show_detail_viewer(idx, pattern, fabric_name):
 # 세션 상태 초기화
 if "df" not in st.session_state: st.session_state.df = None
 if "patterns" not in st.session_state: st.session_state.patterns = None
+if "loaded_file" not in st.session_state: st.session_state.loaded_file = None
 
 # A. 파일 업로드 섹션
 uploaded_file = st.file_uploader(
@@ -967,6 +1113,17 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
+    # 파일이 변경되었으면 캐시 초기화 (파일명 + 크기 체크)
+    file_key = f"{uploaded_file.name}_{uploaded_file.size}"
+    if st.session_state.loaded_file != file_key:
+        st.session_state.patterns = None
+        st.session_state.df = None
+        st.session_state.loaded_file = file_key
+        # 체크박스 상태도 초기화
+        for key in list(st.session_state.keys()):
+            if key.startswith("chk_"):
+                del st.session_state[key]
+
     # 최초 로드시 패턴 분석 실행
     if st.session_state.patterns is None:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp_file:
@@ -979,51 +1136,112 @@ if uploaded_file is not None:
         st.session_state.patterns = patterns
         st.session_state.style_no = style_no
         
-        # 초기 데이터프레임 생성
-        data_list = []
-        for i, (poly, pattern_name, fabric_name) in enumerate(patterns):
+        # 패턴 DB 로드 (수량 추천용)
+        pattern_db = None
+        if PATTERN_DB_AVAILABLE:
+            try:
+                pattern_db = PatternDB()
+            except:
+                pass
+
+        # 사이즈 목록 추출 (작은 사이즈 → 큰 사이즈 순)
+        def size_sort_key(size):
+            """사이즈를 작은 것부터 큰 것 순으로 정렬하기 위한 키"""
+            size_upper = size.upper()
+            # 표준 의류 사이즈 순서
+            standard_order = {
+                'XS': 10, 'S': 20, 'M': 30, 'L': 40,
+                'XL': 50, '2XL': 60, 'XXL': 60,
+                '3XL': 70, 'XXXL': 70,
+                '4XL': 80, '5XL': 90, '6XL': 100
+            }
+            if size_upper in standard_order:
+                return standard_order[size_upper]
+            # 숫자 사이즈 (85, 90, 95, 100, 105 등)
+            if size.isdigit():
+                return int(size)
+            # 0X, 2X, 4X 등 (아동/특수 사이즈)
+            if size_upper.endswith('X') and size_upper[:-1].isdigit():
+                return int(size_upper[:-1])
+            # 기타: 알파벳 순
+            return 500 + ord(size_upper[0]) if size_upper else 999
+
+        all_sizes = sorted(set(size for _, _, _, size, _ in patterns if size), key=size_sort_key)
+        st.session_state.all_sizes = all_sizes
+        st.session_state.selected_sizes = all_sizes.copy() if all_sizes else []
+
+        # 초기 데이터프레임 생성 (같은 패턴은 사이즈별 동일 번호)
+        # 1단계: 패턴 정보 수집 및 번호 매핑 생성
+        pattern_info = []
+        pattern_number_map = {}  # (pattern_name, fabric) -> 번호
+        current_number = 0
+
+        for i, (poly, pattern_name, fabric_name, size_name, pattern_group) in enumerate(patterns):
             minx, miny, maxx, maxy = poly.bounds
             w, h = (maxx - minx) / 10, (maxy - miny) / 10
-
-            # 대칭 여부 확인
-            is_symmetric, sym_reason = check_symmetry(poly)
-
-            # DXF에서 추출한 원단명 사용 (없으면 겉감)
             extracted_fabric = fabric_name if fabric_name else "겉감"
 
-            # 가로변 직선/평행선 여부 확인
-            has_straight_edge, edge_reason = check_horizontal_edges(poly)
+            # 수량/구분 결정
+            db_used = False
+            if pattern_db and len(pattern_db.records) > 0:
+                pred_qty, pred_cat, confidence, refs = pattern_db.predict_quantity(poly)
+                if confidence >= 0.5:
+                    count = pred_qty
+                    default_desc = pred_cat
+                    db_used = True
 
-            # 수량 결정 우선순위:
-            # 1순위: 좌우대칭 + 가로>=35cm + 세로<=15cm + (직선변 또는 평행선) → 1장 (BODY)
-            # 2순위: 좌우대칭 + 가로>=25cm + 세로<=15cm → 2장 (부속)
-            # 3순위: 대칭 + 가로<=25cm + 세로<=25cm → 4장 (FLAP)
-            # 4순위: 대칭이면 1장 (BODY)
-            # 5순위: 비대칭이면 2장 (부속)
+            if not db_used:
+                is_symmetric, sym_reason = check_symmetry(poly)
+                has_straight_edge, edge_reason = check_horizontal_edges(poly)
 
-            if is_symmetric and sym_reason == "좌우대칭" and w >= 35 and h <= 15 and has_straight_edge:
-                count = 1
-                default_desc = "BODY"
-            elif is_symmetric and sym_reason == "좌우대칭" and w >= 25 and h <= 15:
-                count = 2
-                default_desc = "부속"
-            elif is_symmetric and w <= 25 and h <= 25:
-                count = 4
-                default_desc = "FLAP"
-            elif is_symmetric:
-                count = 1
-                default_desc = "BODY"
+                if is_symmetric and sym_reason == "좌우대칭" and w >= 35 and h <= 15 and has_straight_edge:
+                    count = 1
+                    default_desc = "BODY"
+                elif is_symmetric and sym_reason == "좌우대칭" and w >= 25 and h <= 15:
+                    count = 2
+                    default_desc = "BODY/SLEEVE"
+                elif is_symmetric and w <= 25 and h <= 25:
+                    count = 4
+                    default_desc = "FLAP"
+                elif is_symmetric:
+                    count = 1
+                    default_desc = "BODY"
+                else:
+                    count = 2
+                    default_desc = "BODY/SLEEVE"
+
+            if db_used:
+                desc = default_desc
             else:
-                count = 2
-                default_desc = "부속"
+                desc = pattern_name if pattern_name else default_desc
 
-            # DXF 텍스트에서 패턴 이름이 있으면 사용, 없으면 기본값
-            desc = pattern_name if pattern_name else default_desc
+            # 패턴 키: pattern_group + fabric으로 동일 패턴 식별
+            # pattern_group은 DXF 블록명에서 추출된 패턴 번호 (예: "1", "2", "3")
+            if pattern_group:
+                pattern_key = (pattern_group, extracted_fabric)
+            else:
+                # pattern_group이 없으면 pattern_name 사용
+                pattern_key = (pattern_name or f"P{i}", extracted_fabric)
+            if pattern_key not in pattern_number_map:
+                current_number += 1
+                pattern_number_map[pattern_key] = current_number
 
+            pattern_info.append({
+                'poly': poly, 'pattern_name': pattern_name, 'extracted_fabric': extracted_fabric,
+                'size_name': size_name, 'w': w, 'h': h, 'count': count, 'desc': desc,
+                'pattern_key': pattern_key
+            })
+
+        # 2단계: 데이터프레임 생성
+        data_list = []
+        for info in pattern_info:
+            pattern_num = pattern_number_map[info['pattern_key']]
             data_list.append({
-                "형상": poly_to_base64(poly, get_fabric_color_hex(extracted_fabric)), # DXF 원단명으로 색상 적용
-                "번호": i+1, "원단": extracted_fabric, "구분": desc, "수량": count,
-                "가로(cm)": round(w, 1), "세로(cm)": round(h, 1), "면적_raw": poly.area / 1000000
+                "형상": poly_to_base64(info['poly'], get_fabric_color_hex(info['extracted_fabric'])),
+                "번호": pattern_num, "사이즈": info['size_name'], "원단": info['extracted_fabric'],
+                "구분": info['desc'], "수량": info['count'],
+                "가로(cm)": round(info['w'], 1), "세로(cm)": round(info['h'], 1),
+                "면적_raw": info['poly'].area / 1000000
             })
         st.session_state.df = pd.DataFrame(data_list)
         # 체크박스 상태 초기화
@@ -1036,131 +1254,293 @@ if uploaded_file is not None:
     if patterns:
         # 썸네일 비율 고정용 Max값 계산
         max_dim = 0
-        for p, _, _ in patterns:  # (poly, pattern_name, fabric_name)
+        for p, _, _, _, _ in patterns:  # (poly, pattern_name, fabric_name, size_name, pattern_group)
             minx, miny, maxx, maxy = p.bounds
             max_dim = max(max_dim, maxx - minx, maxy - miny)
-        zoom_span = max_dim * 1.1 
+        zoom_span = max_dim * 1.1
+
+        # ----------------------------------------------------------------
+        # A. 사이즈 선택 UI (그레이딩된 DXF용)
+        # ----------------------------------------------------------------
+        all_sizes = st.session_state.get('all_sizes', [])
+        if len(all_sizes) > 1:
+            st.markdown("#### 📐 사이즈 선택")
+
+            # 사이즈 선택 체크박스
+            size_cols = st.columns(min(len(all_sizes) + 2, 10))
+
+            # 전체 선택/해제 버튼
+            with size_cols[0]:
+                if st.button("✅전체", key="size_all", use_container_width=True):
+                    st.session_state.selected_sizes = all_sizes.copy()
+                    st.rerun()
+            with size_cols[1]:
+                if st.button("⬜해제", key="size_none", use_container_width=True):
+                    st.session_state.selected_sizes = []
+                    st.rerun()
+
+            # 개별 사이즈 체크박스
+            selected_sizes = st.session_state.get('selected_sizes', all_sizes)
+            new_selected = []
+            for idx, size in enumerate(all_sizes):
+                with size_cols[idx + 2] if idx + 2 < len(size_cols) else size_cols[-1]:
+                    if st.checkbox(size, value=(size in selected_sizes), key=f"sz_{size}"):
+                        new_selected.append(size)
+
+            if new_selected != selected_sizes:
+                st.session_state.selected_sizes = new_selected
+                st.rerun()
+
+            st.markdown(f"**선택된 사이즈:** {', '.join(st.session_state.selected_sizes) if st.session_state.selected_sizes else '없음'}")
+
+            # 중첩 시각화
+            with st.expander("🔍 사이즈 중첩 비교", expanded=True):
+                # 패턴 그룹별로 분류 (데이터프레임 번호 기준)
+                from collections import defaultdict
+                pattern_groups = defaultdict(list)
+                for idx, p_data in enumerate(patterns):
+                    poly, pattern_name, fabric_name, size_name, pattern_group = p_data
+                    if size_name:  # 사이즈가 있는 패턴만
+                        # 데이터프레임의 번호를 사용하여 그룹화
+                        if idx < len(st.session_state.df):
+                            df_num = st.session_state.df.at[idx, "번호"]
+                            group_key = f"패턴 {df_num}"
+                        elif pattern_name:
+                            group_key = pattern_name
+                        else:
+                            group_key = "기타"
+                        pattern_groups[group_key].append(p_data)
+
+                if pattern_groups:
+                    # 그룹 수에 따라 컬럼 조정 (최대 6열)
+                    num_groups = len(pattern_groups)
+                    num_cols = min(num_groups, 6)
+
+                    # 그룹을 숫자 기준으로 정렬 (패턴 1, 패턴 2, ... 순서로)
+                    def sort_key(item):
+                        name = item[0]
+                        if name.startswith("패턴 "):
+                            try:
+                                return (0, int(name.replace("패턴 ", "")))
+                            except:
+                                return (1, name)
+                        return (2, name)
+
+                    sorted_groups = sorted(pattern_groups.items(), key=sort_key)
+
+                    # 행별로 그룹 표시
+                    for row_start in range(0, len(sorted_groups), num_cols):
+                        row_groups = sorted_groups[row_start:row_start + num_cols]
+                        overlay_cols = st.columns(len(row_groups))
+
+                        for col_idx, (group_name, group_patterns) in enumerate(row_groups):
+                            with overlay_cols[col_idx]:
+                                st.caption(f"**{group_name}** ({len(group_patterns)}개)")
+                                fig = create_overlay_visualization(
+                                    group_patterns,
+                                    st.session_state.selected_sizes,
+                                    all_sizes
+                                )
+                                st.pyplot(fig, use_container_width=True)
+                                plt.close(fig)
+                else:
+                    st.info("사이즈 정보가 있는 패턴이 없습니다.")
+
+            st.divider()
 
         # ----------------------------------------------------------------
         # B. 일괄 수정 도구 (Batch Edit Tools)
         # ----------------------------------------------------------------
         st.markdown("#### ✨ 일괄 수정 도구")
         tool_col1, tool_col2, tool_col3 = st.columns([1.5, 1.5, 2])
-        
+
+        # 패턴 그룹 매핑 (동일 패턴의 다른 사이즈 연결)
+        all_sizes = st.session_state.get('all_sizes', [])
+        selected_sizes = st.session_state.get('selected_sizes', all_sizes)
+        base_size = selected_sizes[0] if selected_sizes else None
+
+        group_to_indices = {}
+        base_indices_set = set()
+        for idx, p_data in enumerate(patterns):
+            size_name = p_data[3]
+            pattern_group = p_data[4]
+            if pattern_group:
+                if pattern_group not in group_to_indices:
+                    group_to_indices[pattern_group] = {}
+                group_to_indices[pattern_group][size_name] = idx
+            # 기본 사이즈 인덱스
+            if not all_sizes or size_name == base_size or not size_name:
+                base_indices_set.add(idx)
+
         # 1. 전체 선택/해제/복사/삭제
         with tool_col1:
             c1, c2, c3, c4 = st.columns(4)
-            if c1.button("✅전체", use_container_width=True, help="모든 패턴 선택"):
-                for i in range(len(patterns)): st.session_state[f"chk_{i}"] = True
+            if c1.button("✅전체", use_container_width=True, help="기본 사이즈 전체 선택"):
+                for i in base_indices_set: st.session_state[f"chk_{i}"] = True
                 st.rerun()
             if c2.button("⬜해제", use_container_width=True, help="모든 선택 해제"):
                 for i in range(len(patterns)): st.session_state[f"chk_{i}"] = False
                 st.rerun()
             if c3.button("📋복사", use_container_width=True, help="선택 패턴 복사"):
-                sel_indices = [i for i in range(len(patterns)) if st.session_state.get(f"chk_{i}")]
+                sel_indices = [i for i in base_indices_set if st.session_state.get(f"chk_{i}")]
                 if sel_indices:
-                    # 현재 데이터 복사
                     new_patterns = list(st.session_state.patterns)
                     new_df = st.session_state.df.copy()
+                    selected_sizes = st.session_state.get('selected_sizes', [])
+                    all_sizes = st.session_state.get('all_sizes', [])
 
+                    # 선택한 패턴 + 모든 선택된 사이즈 확장하여 복사
+                    expanded_indices = set()
                     for idx in sel_indices:
-                        # 패턴 복제 (poly, pattern_name, fabric_name)
+                        pattern_group = patterns[idx][4]
+                        if pattern_group and pattern_group in group_to_indices:
+                            # 선택된 사이즈의 동일 패턴 모두 추가
+                            for size_name, size_idx in group_to_indices[pattern_group].items():
+                                if not selected_sizes or size_name in selected_sizes:
+                                    expanded_indices.add(size_idx)
+                        else:
+                            expanded_indices.add(idx)
+
+                    for idx in sorted(expanded_indices):
+                        orig_fabric = new_df.iloc[idx]["원단"]
+                        new_fabric = "복사_" + orig_fabric
+                        new_color = get_fabric_color_hex(new_fabric)
+
                         orig_pattern = st.session_state.patterns[idx]
                         new_patterns.append(orig_pattern)
-
-                        # 데이터프레임 행 복제
                         new_row = new_df.iloc[idx].copy()
-                        new_row["번호"] = len(new_patterns)  # 새 번호 부여
-                        new_row["원단"] = "복사_" + new_row["원단"]  # 복사 표시
-                        # 썸네일 색상 업데이트
-                        new_row["형상"] = poly_to_base64(orig_pattern[0], get_fabric_color_hex(new_row["원단"]))
+                        new_row["번호"] = len(new_patterns)
+                        new_row["원단"] = new_fabric
+                        new_row["형상"] = poly_to_base64(orig_pattern[0], new_color)
                         new_df = pd.concat([new_df, pd.DataFrame([new_row])], ignore_index=True)
 
-                    # 세션 상태 업데이트
                     st.session_state.patterns = new_patterns
                     st.session_state.df = new_df
-
-                    # 새 패턴들의 체크박스 초기화
                     for i in range(len(patterns), len(new_patterns)):
                         st.session_state[f"chk_{i}"] = False
-
-                    # 기존 선택 해제
                     for i in sel_indices:
                         st.session_state[f"chk_{i}"] = False
-
                     st.rerun()
             if c4.button("🗑삭제", use_container_width=True, help="선택 패턴 삭제"):
-                sel_indices = [i for i in range(len(patterns)) if st.session_state.get(f"chk_{i}")]
+                sel_indices = [i for i in base_indices_set if st.session_state.get(f"chk_{i}")]
                 if sel_indices:
-                    # 선택되지 않은 패턴만 유지
-                    keep_indices = [i for i in range(len(patterns)) if i not in sel_indices]
+                    selected_sizes = st.session_state.get('selected_sizes', [])
+                    all_sizes = st.session_state.get('all_sizes', [])
+                    new_df = st.session_state.df
 
-                    # 패턴 리스트 필터링
+                    # 선택한 패턴 + 모든 선택된 사이즈 확장하여 삭제
+                    delete_indices = set()
+                    for idx in sel_indices:
+                        pattern_group = patterns[idx][4]
+                        if pattern_group and pattern_group in group_to_indices:
+                            for size_name, size_idx in group_to_indices[pattern_group].items():
+                                if not selected_sizes or size_name in selected_sizes:
+                                    delete_indices.add(size_idx)
+                        else:
+                            delete_indices.add(idx)
+
+                    keep_indices = [i for i in range(len(patterns)) if i not in delete_indices]
                     new_patterns = [st.session_state.patterns[i] for i in keep_indices]
-
-                    # 데이터프레임 필터링 및 번호 재정렬
                     new_df = st.session_state.df.iloc[keep_indices].copy()
                     new_df = new_df.reset_index(drop=True)
                     new_df["번호"] = range(1, len(new_df) + 1)
-
-                    # 세션 상태 업데이트
                     st.session_state.patterns = new_patterns
                     st.session_state.df = new_df
-
-                    # 체크박스 상태 초기화
                     for key in list(st.session_state.keys()):
                         if key.startswith("chk_"):
                             del st.session_state[key]
                     for i in range(len(new_patterns)):
                         st.session_state[f"chk_{i}"] = False
-
                     st.rerun()
 
-        # 2. 원단명 변경
+        # 2. 원단명 변경 (선택 패턴의 모든 사이즈에 적용)
         with tool_col2:
             f1, f2 = st.columns([3, 1])
             new_fabric = f1.text_input("원단명", placeholder="예: 안감", label_visibility="collapsed")
             if f2.button("원단적용", use_container_width=True):
-                sel_indices = [i for i in range(len(patterns)) if st.session_state.get(f"chk_{i}")]
+                sel_indices = [i for i in base_indices_set if st.session_state.get(f"chk_{i}")]
                 if sel_indices and new_fabric:
                     new_color = get_fabric_color_hex(new_fabric)
-                    for idx in sel_indices: 
+                    selected_sizes = st.session_state.get('selected_sizes', [])
+                    all_sizes = st.session_state.get('all_sizes', [])
+
+                    # 선택한 패턴 + 모든 선택된 사이즈 확장하여 원단 변경
+                    expanded_indices = set()
+                    for idx in sel_indices:
+                        pattern_group = patterns[idx][4]
+                        if pattern_group and pattern_group in group_to_indices:
+                            for size_name, size_idx in group_to_indices[pattern_group].items():
+                                if not selected_sizes or size_name in selected_sizes:
+                                    expanded_indices.add(size_idx)
+                        else:
+                            expanded_indices.add(idx)
+
+                    for idx in expanded_indices:
                         st.session_state.df.at[idx, "원단"] = new_fabric
-                        # 썸네일 색상 업데이트
                         st.session_state.df.at[idx, "형상"] = poly_to_base64(patterns[idx][0], new_color)
                     st.rerun()
-        
-        # 3. 수량 변경
+
+        # 3. 수량 변경 (선택 패턴의 모든 사이즈에 적용)
         with tool_col3:
             n1, n2 = st.columns([3, 1])
             new_count = n1.number_input("수량", min_value=0, label_visibility="collapsed")
             if n2.button("수량적용", use_container_width=True):
-                sel_indices = [i for i in range(len(patterns)) if st.session_state.get(f"chk_{i}")]
+                sel_indices = [i for i in base_indices_set if st.session_state.get(f"chk_{i}")]
                 if sel_indices:
-                    for idx in sel_indices: st.session_state.df.at[idx, "수량"] = new_count
+                    selected_sizes = st.session_state.get('selected_sizes', [])
+                    all_sizes = st.session_state.get('all_sizes', [])
+
+                    # 선택한 패턴 + 모든 선택된 사이즈 확장하여 수량 변경
+                    expanded_indices = set()
+                    for idx in sel_indices:
+                        pattern_group = patterns[idx][4]
+                        if pattern_group and pattern_group in group_to_indices:
+                            for size_name, size_idx in group_to_indices[pattern_group].items():
+                                if not selected_sizes or size_name in selected_sizes:
+                                    expanded_indices.add(size_idx)
+                        else:
+                            expanded_indices.add(idx)
+
+                    for idx in expanded_indices:
+                        st.session_state.df.at[idx, "수량"] = new_count
                     st.rerun()
 
         st.divider()
 
         # ----------------------------------------------------------------
-        # C. 썸네일 그리드 (20 Columns Grid)
+        # C. 썸네일 그리드 (20 Columns Grid) - 기본 사이즈만 표시
         # ----------------------------------------------------------------
-        st.caption("💡 썸네일 아래 **[숫자 버튼]**을 누르면 확대 창이 열립니다.")
-        
+        all_sizes = st.session_state.get('all_sizes', [])
+        selected_sizes = st.session_state.get('selected_sizes', all_sizes)
+        base_size = selected_sizes[0] if selected_sizes else None
+
+        if base_size and all_sizes:
+            st.caption(f"💡 **{base_size}** 사이즈 썸네일 (숫자 버튼으로 확대)")
+        else:
+            st.caption("💡 썸네일 아래 **[숫자 버튼]**을 누르면 확대 창이 열립니다.")
+
+        # 기본 사이즈만 필터링 (썸네일용)
+        filtered_patterns = []
+        for orig_idx, (poly, pattern_name, fabric_name, size_name, pattern_group) in enumerate(patterns):
+            if not all_sizes:  # 사이즈 없는 DXF
+                filtered_patterns.append((orig_idx, poly, pattern_name, fabric_name, size_name, pattern_group))
+            elif size_name == base_size:  # 기본 사이즈만
+                filtered_patterns.append((orig_idx, poly, pattern_name, fabric_name, size_name, pattern_group))
+            elif not size_name:  # 사이즈 없는 패턴
+                filtered_patterns.append((orig_idx, poly, pattern_name, fabric_name, size_name, pattern_group))
+
         cols_per_row = 20
-        rows = math.ceil(len(patterns) / cols_per_row)
-        
+        rows = math.ceil(len(filtered_patterns) / cols_per_row)
+
         for row in range(rows):
             cols = st.columns(cols_per_row)
             for col_idx in range(cols_per_row):
-                idx = row * cols_per_row + col_idx
-                if idx < len(patterns):
+                list_idx = row * cols_per_row + col_idx
+                if list_idx < len(filtered_patterns):
+                    orig_idx, p, pattern_name, current_fabric, size_name, _ = filtered_patterns[list_idx]
                     with cols[col_idx]:
-                        p = patterns[idx][0]
-                        current_fabric = df.at[idx, "원단"]
-                        
                         # Matplotlib 썸네일 생성 (가볍고 빠름)
-                        fig, ax = plt.subplots(figsize=(1, 1)) 
+                        fig, ax = plt.subplots(figsize=(1, 1))
                         x, y = p.exterior.xy
                         ax.plot(x, y, 'k-', lw=0.5)
                         ax.fill(x, y, color=get_fabric_color_hex(current_fabric), alpha=0.6)
@@ -1169,14 +1549,16 @@ if uploaded_file is not None:
                         ax.set_ylim(p.centroid.y - zoom_span/2, p.centroid.y + zoom_span/2)
                         ax.set_aspect('equal'); ax.axis('off')
                         st.pyplot(fig, use_container_width=True)
-                        plt.close(fig) # 메모리 해제
-                        
-                        # 팝업 호출 버튼
-                        if st.button(f"{idx+1}", key=f"btn_zoom_{idx}", use_container_width=True):
-                            show_detail_viewer(idx, p, current_fabric)
-                        
+                        plt.close(fig)  # 메모리 해제
+
+                        # 팝업 호출 버튼 (번호만 표시, 사이즈는 사이즈선택 UI에서 선택됨)
+                        pattern_num = st.session_state.df.at[orig_idx, "번호"] if orig_idx < len(st.session_state.df) else orig_idx+1
+                        btn_label = f"{pattern_num}"
+                        if st.button(btn_label, key=f"btn_zoom_{orig_idx}", use_container_width=True):
+                            show_detail_viewer(orig_idx, p, current_fabric)
+
                         # 선택 체크박스
-                        st.checkbox("선택", key=f"chk_{idx}", label_visibility="collapsed")
+                        st.checkbox("선택", key=f"chk_{orig_idx}", label_visibility="collapsed")
 
         st.divider()
 
@@ -1185,148 +1567,345 @@ if uploaded_file is not None:
         # ----------------------------------------------------------------
         col1, col2 = st.columns([3, 2])
         
-        # [왼쪽] 상세 리스트 (Data Editor)
+        # [왼쪽] 상세 리스트 (Data Editor) - 기본 사이즈만 편집, 모든 사이즈에 적용
         with col1:
             st.markdown("#### 📝 상세 리스트")
-            # 내부 계산용 컬럼은 숨기고 표시
-            display_df = st.session_state.df.copy()
-            # 면적(raw)는 m² 단위이므로, cm²로 변환하려면 * 10000
-            display_df["면적(cm²)"] = (display_df["면적_raw"] * 10000).round(1) 
+
+            all_sizes = st.session_state.get('all_sizes', [])
+            selected_sizes = st.session_state.get('selected_sizes', all_sizes)
+
+            # 기본 사이즈 = 첫 번째 선택된 사이즈
+            base_size = selected_sizes[0] if selected_sizes else None
+
+            # 패턴 그룹별 인덱스 매핑 (동일 패턴의 다른 사이즈 연결)
+            # pattern_group이 같으면 동일 패턴의 다른 사이즈
+            group_to_indices = {}  # {pattern_group: {size: idx, ...}}
+            for idx, p_data in enumerate(patterns):
+                size_name = p_data[3]
+                pattern_group = p_data[4]
+                if pattern_group:
+                    if pattern_group not in group_to_indices:
+                        group_to_indices[pattern_group] = {}
+                    group_to_indices[pattern_group][size_name] = idx
+
+            # 기본 사이즈 인덱스만 추출 (편집용)
+            base_indices = []
+            for idx, p_data in enumerate(patterns):
+                size_name = p_data[3]
+                if not all_sizes:  # 사이즈 없는 DXF
+                    base_indices.append(idx)
+                elif size_name == base_size:
+                    base_indices.append(idx)
+                elif not size_name:  # 사이즈 없는 패턴
+                    base_indices.append(idx)
+
+            # 선택된 모든 사이즈의 인덱스 (요척 계산용) - DataFrame 기반
+            all_filtered_indices = []
+            for idx in range(len(st.session_state.df)):
+                size_val = st.session_state.df.at[idx, '사이즈'] if '사이즈' in st.session_state.df.columns else ''
+                if not all_sizes or not size_val or size_val in selected_sizes:
+                    all_filtered_indices.append(idx)
+            st.session_state.filtered_indices = all_filtered_indices
+
+            # 기본 사이즈 표시
+            if base_size and all_sizes:
+                st.caption(f"✏️ **{base_size}** 사이즈 편집 → 모든 사이즈에 적용")
+
+            # 데이터프레임 생성 (기본 사이즈만, 사이즈 열 숨김)
+            display_df = st.session_state.df.iloc[base_indices].copy()
+            display_df["면적(cm²)"] = (display_df["면적_raw"] * 10000).round(1)
             display_df = display_df.drop(columns=["면적_raw"])
-            
+            # 사이즈 열 숨김 (사이즈선택 UI에서 이미 선택됨)
+            if "사이즈" in display_df.columns:
+                display_df = display_df.drop(columns=["사이즈"])
+            display_df = display_df.reset_index(drop=True)
+
             edited_df = st.data_editor(
                 display_df,
                 hide_index=True,
                 use_container_width=True,
                 num_rows="fixed",
-                disabled=["면적(cm²)", "형상"], # 수정 불가 컬럼
+                disabled=["면적(cm²)", "형상"],
                 column_config={
                     "형상": st.column_config.ImageColumn(
                         "형상", help="패턴 미리보기", width="small"
                     )
                 },
-                height=735,  # 20개 행 표시 (행당 약 35px + 헤더)
-                key="editor"
+                height=735,
+                key="editor_base"
             )
-            
-            # 변경사항 감지 및 데이터 업데이트
-            if edited_df is not None:
-                # 원단명이 변경되었는지 확인하여 썸네일 업데이트
-                is_changed = False
-                for i in range(len(edited_df)):
-                    old_fabric = st.session_state.df.at[i, "원단"]
-                    new_fabric = edited_df.at[i, "원단"]
-                    
-                    # 1. 원단명 변경 시 썸네일 재생성
-                    if old_fabric != new_fabric:
-                        new_color = get_fabric_color_hex(new_fabric)
-                        edited_df.at[i, "형상"] = poly_to_base64(patterns[i][0], new_color)
-                        is_changed = True
-                    
-                    # 2. 다른 데이터 업데이트 (수량 등)
-                    if st.session_state.df.at[i, "수량"] != edited_df.at[i, "수량"]:
-                        is_changed = True
 
-                if is_changed:
-                    # 면적 컬럼 등을 제외한 원본 데이터 구조로 다시 복원하여 저장
-                    # (현재 edited_df에는 '면적(cm²)'가 있고 '면적_raw'가 없음)
-                    
-                    # 기존 면적_raw 유지
-                    edited_df["면적_raw"] = st.session_state.df["면적_raw"] 
-                    # 계산된 컬럼 제거
-                    if "면적(cm²)" in edited_df.columns:
-                        edited_df = edited_df.drop(columns=["면적(cm²)"])
-                        
-                    st.session_state.df = edited_df
-                    st.rerun()
-            
-        # [오른쪽] 요척 결과 카드 (Compact View)
+            # 변경사항 감지 및 모든 사이즈에 적용
+            if edited_df is not None:
+                selected_sizes = st.session_state.get('selected_sizes', [])
+                all_sizes = st.session_state.get('all_sizes', [])
+
+                for i in range(len(edited_df)):
+                    base_idx = base_indices[i] if i < len(base_indices) else i
+
+                    # 변경 확인
+                    old_fabric = st.session_state.df.at[base_idx, "원단"]
+                    new_fabric = edited_df.at[i, "원단"]
+                    old_qty = st.session_state.df.at[base_idx, "수량"]
+                    new_qty = edited_df.at[i, "수량"]
+                    old_cat = st.session_state.df.at[base_idx, "구분"]
+                    new_cat = edited_df.at[i, "구분"]
+
+                    has_change = (old_fabric != new_fabric or old_qty != new_qty or old_cat != new_cat)
+
+                    if has_change:
+                        base_size = patterns[base_idx][3]
+                        base_area = st.session_state.df.at[base_idx, "면적_raw"]
+
+                        # 기본 사이즈 업데이트
+                        st.session_state.df.at[base_idx, "원단"] = new_fabric
+                        st.session_state.df.at[base_idx, "수량"] = new_qty
+                        st.session_state.df.at[base_idx, "구분"] = new_cat
+                        if old_fabric != new_fabric:
+                            st.session_state.df.at[base_idx, "형상"] = poly_to_base64(patterns[base_idx][0], get_fabric_color_hex(new_fabric))
+
+                        # 동일 패턴의 다른 사이즈에도 적용 (번호+원단으로 매칭)
+                        base_num = st.session_state.df.at[base_idx, "번호"]
+                        for j in range(len(st.session_state.df)):
+                            if j == base_idx:
+                                continue
+                            row_num = st.session_state.df.at[j, "번호"]
+                            row_fabric = st.session_state.df.at[j, "원단"]
+                            size_name = st.session_state.df.at[j, "사이즈"] if "사이즈" in st.session_state.df.columns else ""
+
+                            # 같은 번호+원단이고, 선택된 사이즈인 경우
+                            if (row_num == base_num and
+                                row_fabric == old_fabric and
+                                (not all_sizes or not size_name or size_name in selected_sizes)):
+                                st.session_state.df.at[j, "원단"] = new_fabric
+                                st.session_state.df.at[j, "수량"] = new_qty
+                                st.session_state.df.at[j, "구분"] = new_cat
+                                if old_fabric != new_fabric and j < len(patterns):
+                                    st.session_state.df.at[j, "형상"] = poly_to_base64(patterns[j][0], get_fabric_color_hex(new_fabric))
+
+                        # 변경 후 새로고침하여 요척결과 갱신
+                        st.rerun()
+
+        # [오른쪽] 요척 결과 카드 (Compact View) - 사이즈별 표시
         with col2:
             st.markdown("#### 📊 요척 결과")
-            
+
             # 헤더 라벨
-            h1, h2, h_u, h3, h4 = st.columns([1.4, 0.9, 0.9, 0.9, 1.4]) # 컬럼 비율 조정 (단위 +0.1, 요척 -0.1)
-            h1.caption("원단명")
+            h1, h2, h_u, h3, h4 = st.columns([1.4, 0.9, 0.9, 0.9, 1.4])
+            h1.caption("원단/사이즈")
             h2.caption("폭(W)")
             h_u.caption("단위")
             h3.caption("로스(%)")
             h4.caption("필요요척(YD)")
 
-            # 데이터 재계산
-            calc_df = edited_df.copy()
-            calc_df["면적_raw"] = st.session_state.df["면적_raw"]
-            grouped = calc_df.groupby("원단")
-            
-            for i, (fabric_name, group) in enumerate(grouped):
+            # 데이터 재계산 (필터링된 데이터 사용)
+            filtered_indices = st.session_state.get('filtered_indices', list(range(len(st.session_state.df))))
+            calc_df = st.session_state.df.iloc[filtered_indices].copy()
+
+            # 선택된 사이즈 목록
+            selected_sizes = st.session_state.get('selected_sizes', [])
+            all_sizes_in_file = st.session_state.get('all_sizes', [])
+
+            # 원단별 그룹
+            fabric_groups = calc_df.groupby("원단")
+
+            # 전체 합계 저장용
+            total_yield_all = 0.0
+            fabric_settings = {}  # 원단별 설정 저장
+
+            fab_idx = 0
+            for fabric_name, fabric_group in fabric_groups:
+                color = get_fabric_color_hex(fabric_name)
+
+                # 원단 헤더 (설정 입력)
                 with st.container(border=True):
-                    # 한 줄(Row) 레이아웃 적용
                     c1, c2, c_unit, c3, c4 = st.columns([1.4, 0.9, 0.9, 0.9, 1.4])
-                    
-                    with c1: # 원단명 뱃지
-                        color = get_fabric_color_hex(fabric_name)
+
+                    with c1:
                         st.markdown(f"""
                         <div style='background-color:{color}; padding:5px 0px; border-radius:4px; text-align:center;'>
                             <strong style='font-size:14px; color:#333;'>{fabric_name}</strong>
                         </div>""", unsafe_allow_html=True)
-                    
-                    with c2: # 폭 입력
-                        input_width = st.number_input("W", value=58.00, min_value=10.0, step=0.1, format="%.2f", key=f"w{i}", label_visibility="collapsed")
-                        
-                    with c_unit: # 단위 선택 (cm/in)
-                        unit = st.selectbox("U", ["in", "cm"], key=f"unit{i}", label_visibility="collapsed")
-                    
-                    with c3: # 로스 입력
-                        input_loss = st.number_input("L", value=15, min_value=0, key=f"l{i}", label_visibility="collapsed")
-                    
-                    with c4: # 결과 계산 및 표시
-                        group_area = sum(row['면적_raw'] * row['수량'] for _, row in group.iterrows())
-                        
+
+                    with c2:
+                        input_width = st.number_input("W", value=58.00, min_value=10.0, step=0.1, format="%.2f", key=f"w_{fabric_name}", label_visibility="collapsed")
+
+                    with c_unit:
+                        unit = st.selectbox("U", ["in", "cm"], key=f"unit_{fabric_name}", label_visibility="collapsed")
+
+                    with c3:
+                        input_loss = st.number_input("L", value=15, min_value=0, key=f"l_{fabric_name}", label_visibility="collapsed")
+
+                    # 설정 저장 (원단명 기반)
+                    fabric_settings[fabric_name] = {
+                        'width': input_width,
+                        'unit': unit,
+                        'loss': input_loss
+                    }
+
+                    # 원단 전체 합계 계산
+                    if all_sizes_in_file and selected_sizes:
+                        # 사이즈가 있는 경우: 선택된 사이즈만 합산
+                        fabric_total_yd = 0.0
+                        for size in selected_sizes:
+                            size_data = fabric_group[fabric_group['사이즈'] == size]
+                            if not size_data.empty:
+                                size_area = sum(row['면적_raw'] * row['수량'] for _, row in size_data.iterrows())
+                                if input_width > 0:
+                                    width_m = input_width / 100 if unit == "cm" else (input_width * 2.54) / 100
+                                    size_yd = ((size_area / width_m) / ((100-input_loss)/100)) * 1.09361
+                                    fabric_total_yd += size_yd
+
+                        with c4:
+                            st.markdown(f"""
+                            <div style='text-align:right; padding-top:5px;'>
+                                <span style='font-size:16px; color:#0068c9; font-weight:bold;'>{fabric_total_yd:.2f} YD</span>
+                            </div>""", unsafe_allow_html=True)
+
+                        total_yield_all += fabric_total_yd
+                    else:
+                        # 사이즈 없는 경우: 전체 합산
+                        group_area = sum(row['면적_raw'] * row['수량'] for _, row in fabric_group.iterrows())
                         if input_width > 0:
-                            # 1. 폭을 미터(m) 단위로 환산
-                            if unit == "cm":
-                                width_m = input_width / 100
-                            else: # in
-                                width_m = (input_width * 2.54) / 100
-                                
-                            # 2. 공식: (총면적으로 필요한 길이(m) / 효율) * 야드환산계수
-                            # 필요한 길이(m) = 총면적(m²) / 폭(m)
+                            width_m = input_width / 100 if unit == "cm" else (input_width * 2.54) / 100
                             req_yd = ((group_area / width_m) / ((100-input_loss)/100)) * 1.09361
-                        else: req_yd = 0
-                        
-                        st.markdown(f"""
-                        <div style='text-align:right; padding-top:5px;'>
-                            <span style='font-size:18px; color:#0068c9; font-weight:bold;'>{req_yd:.2f} YD</span>
-                        </div>""", unsafe_allow_html=True)
+                        else:
+                            req_yd = 0
+
+                        with c4:
+                            st.markdown(f"""
+                            <div style='text-align:right; padding-top:5px;'>
+                                <span style='font-size:18px; color:#0068c9; font-weight:bold;'>{req_yd:.2f} YD</span>
+                            </div>""", unsafe_allow_html=True)
+
+                        total_yield_all += req_yd
+
+                # 사이즈별 상세 (사이즈가 있는 경우만)
+                if all_sizes_in_file and selected_sizes:
+                    for size in selected_sizes:
+                        size_data = fabric_group[fabric_group['사이즈'] == size]
+                        if not size_data.empty:
+                            size_area = sum(row['면적_raw'] * row['수량'] for _, row in size_data.iterrows())
+
+                            if input_width > 0:
+                                width_m = input_width / 100 if unit == "cm" else (input_width * 2.54) / 100
+                                size_yd = ((size_area / width_m) / ((100-input_loss)/100)) * 1.09361
+                            else:
+                                size_yd = 0
+
+                            # 사이즈별 행 (들여쓰기)
+                            s1, s2, s3, s4, s5 = st.columns([1.4, 0.9, 0.9, 0.9, 1.4])
+                            with s1:
+                                st.markdown(f"""
+                                <div style='padding-left:20px; color:#666;'>
+                                    └ {size}
+                                </div>""", unsafe_allow_html=True)
+                            with s5:
+                                st.markdown(f"""
+                                <div style='text-align:right; color:#666;'>
+                                    {size_yd:.2f} YD
+                                </div>""", unsafe_allow_html=True)
+
+                fab_idx += 1
+
+            # 전체 합계 표시
+            st.markdown("---")
+            t1, t2, t3, t4, t5 = st.columns([1.4, 0.9, 0.9, 0.9, 1.4])
+            with t1:
+                st.markdown("""
+                <div style='padding:5px 0px; text-align:center;'>
+                    <strong style='font-size:14px;'>합계</strong>
+                </div>""", unsafe_allow_html=True)
+            with t5:
+                st.markdown(f"""
+                <div style='text-align:right; padding-top:5px;'>
+                    <span style='font-size:20px; color:#d94a4a; font-weight:bold;'>{total_yield_all:.2f} YD</span>
+                </div>""", unsafe_allow_html=True)
+
+            # 설정값 세션에 저장 (엑셀 내보내기용)
+            st.session_state.fabric_settings = fabric_settings
 
             # ----------------------------------------------------------------
             # E. 엑셀 다운로드 버튼
             # ----------------------------------------------------------------
             st.divider()
 
-            # 요척 결과 데이터 수집
+            # 요척 결과 데이터 수집 (사이즈별)
             yield_data = []
-            for i, (fabric_name, group) in enumerate(grouped):
-                input_width = st.session_state.get(f"w{i}", 58.0)
-                unit = st.session_state.get(f"unit{i}", "in")
-                input_loss = st.session_state.get(f"l{i}", 15)
-                group_area = sum(row['면적_raw'] * row['수량'] for _, row in group.iterrows())
+            total_yield = 0.0
 
-                if input_width > 0:
-                    if unit == "cm":
-                        width_m = input_width / 100
-                    else:
-                        width_m = (input_width * 2.54) / 100
-                    req_yd = ((group_area / width_m) / ((100-input_loss)/100)) * 1.09361
+            # 설정값 가져오기
+            fabric_settings = st.session_state.get('fabric_settings', {})
+            selected_sizes = st.session_state.get('selected_sizes', [])
+            all_sizes_in_file = st.session_state.get('all_sizes', [])
+
+            for fabric_name, fabric_group in fabric_groups:
+                settings = fabric_settings.get(fabric_name, {})
+                input_width = settings.get('width', 58.0)
+                unit = settings.get('unit', 'in')
+                input_loss = settings.get('loss', 15)
+
+                if all_sizes_in_file and selected_sizes:
+                    # 사이즈별 행 추가
+                    fabric_total = 0.0
+                    for size in selected_sizes:
+                        size_data = fabric_group[fabric_group['사이즈'] == size]
+                        if not size_data.empty:
+                            size_area = sum(row['면적_raw'] * row['수량'] for _, row in size_data.iterrows())
+                            if input_width > 0:
+                                width_m = input_width / 100 if unit == "cm" else (input_width * 2.54) / 100
+                                size_yd = ((size_area / width_m) / ((100-input_loss)/100)) * 1.09361
+                            else:
+                                size_yd = 0
+
+                            yield_data.append({
+                                "원단명": fabric_name,
+                                "사이즈": size,
+                                "폭": input_width,
+                                "단위": unit,
+                                "효율(%)": 100 - input_loss,
+                                "필요요척(YD)": round(size_yd, 2)
+                            })
+                            fabric_total += size_yd
+
+                    # 원단 소계
+                    yield_data.append({
+                        "원단명": f"{fabric_name} 소계",
+                        "사이즈": "",
+                        "폭": "",
+                        "단위": "",
+                        "효율(%)": "",
+                        "필요요척(YD)": round(fabric_total, 2)
+                    })
+                    total_yield += fabric_total
                 else:
-                    req_yd = 0
+                    # 사이즈 없는 경우
+                    group_area = sum(row['면적_raw'] * row['수량'] for _, row in fabric_group.iterrows())
+                    if input_width > 0:
+                        width_m = input_width / 100 if unit == "cm" else (input_width * 2.54) / 100
+                        req_yd = ((group_area / width_m) / ((100-input_loss)/100)) * 1.09361
+                    else:
+                        req_yd = 0
 
-                yield_data.append({
-                    "원단명": fabric_name,
-                    "폭": input_width,
-                    "단위": unit,
-                    "효율(%)": 100 - input_loss,
-                    "필요요척(YD)": round(req_yd, 2)
-                })
+                    yield_data.append({
+                        "원단명": fabric_name,
+                        "사이즈": "",
+                        "폭": input_width,
+                        "단위": unit,
+                        "효율(%)": 100 - input_loss,
+                        "필요요척(YD)": round(req_yd, 2)
+                    })
+                    total_yield += req_yd
+
+            # 전체 합계 행 추가
+            yield_data.append({
+                "원단명": "합계",
+                "사이즈": "",
+                "폭": "",
+                "단위": "",
+                "효율(%)": "",
+                "필요요척(YD)": round(total_yield, 2)
+            })
 
             yield_df = pd.DataFrame(yield_data)
 
@@ -1336,14 +1915,16 @@ if uploaded_file is not None:
             style_no = st.session_state.get('style_no', '')
 
             with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                # 시트1: 상세리스트 (형상 컬럼 제외)
-                detail_df = display_df.drop(columns=["형상"], errors='ignore')
+                # 시트1: 상세리스트 (선택된 모든 사이즈 포함)
+                export_df = calc_df.copy()
+                export_df["면적(cm²)"] = (export_df["면적_raw"] * 10000).round(1)
+                detail_df = export_df.drop(columns=["형상", "면적_raw"], errors='ignore')
                 # 파일명, 스타일번호 컬럼 추가
                 detail_df.insert(0, "스타일번호", style_no)
                 detail_df.insert(0, "파일명", file_name)
                 detail_df.to_excel(writer, sheet_name='상세리스트', index=False)
 
-                # 시트2: 요척결과
+                # 시트2: 요척결과 (사이즈별)
                 # 파일명, 스타일번호 컬럼 추가
                 yield_df.insert(0, "스타일번호", style_no)
                 yield_df.insert(0, "파일명", file_name)
@@ -1430,9 +2011,9 @@ if uploaded_file is not None:
 
             # 원단별 설정 입력
             for i, fabric in enumerate(fabric_list):
-                # 요척 결과에서 설정한 폭과 단위 가져오기
-                width_val = st.session_state.get(f"w{i}", 58.0)
-                unit_val = st.session_state.get(f"unit{i}", "in")
+                # 요척 결과에서 설정한 폭과 단위 가져오기 (원단명 기반 키)
+                width_val = st.session_state.get(f"w_{fabric}", 58.0)
+                unit_val = st.session_state.get(f"unit_{fabric}", "in")
                 # cm로 변환
                 if unit_val == "in":
                     width_cm = width_val * 2.54
@@ -1466,11 +2047,23 @@ if uploaded_file is not None:
                 try:
                     nesting_results = {}
 
+                    # 선택된 사이즈로 필터링된 인덱스 (상세 리스트와 동일)
+                    all_sizes = st.session_state.get('all_sizes', [])
+                    selected_sizes = st.session_state.get('selected_sizes', all_sizes)
+
+                    filtered_indices_for_nesting = []
+                    for idx, p_data in enumerate(patterns):
+                        size_name = p_data[3]  # (poly, pattern_name, fabric_name, size_name, pattern_group)
+                        if not all_sizes or not size_name or size_name in selected_sizes:
+                            filtered_indices_for_nesting.append(idx)
+
                     # 원단별로 네스팅 실행
                     for fabric in fabric_list:
-                        # 해당 원단의 패턴만 필터링
-                        fabric_df = st.session_state.df[st.session_state.df['원단'] == fabric]
-                        fabric_indices = fabric_df.index.tolist()
+                        # 해당 원단 + 선택된 사이즈의 패턴만 필터링
+                        fabric_indices = [
+                            idx for idx in filtered_indices_for_nesting
+                            if st.session_state.df.loc[idx, '원단'] == fabric
+                        ]
 
                         if len(fabric_indices) == 0:
                             continue
@@ -1482,10 +2075,13 @@ if uploaded_file is not None:
                             if idx < len(patterns):
                                 row = st.session_state.df.loc[idx]
                                 poly = patterns[idx][0]
+                                size_name = patterns[idx][3]  # 사이즈 정보
                                 coords = list(poly.exterior.coords)[:-1]
                                 coords_cm = [(p[0] / 10, p[1] / 10) for p in coords]
                                 quantity = int(row['수량']) * fabric_marker_qty
-                                pattern_id = str(row['구분'])[:10] if row['구분'] else f"P{idx+1}"
+                                # 패턴ID에 사이즈 정보 포함 (구분 12자 + 사이즈 4자)
+                                base_id = str(row['구분'])[:12] if row['구분'] else f"P{idx+1}"
+                                pattern_id = f"{base_id}\n{size_name[:4]}" if size_name else base_id
                                 pattern_data.append({
                                     'coords_cm': coords_cm,
                                     'quantity': quantity,
@@ -1551,8 +2147,17 @@ if uploaded_file is not None:
                         marker_qty = result.get('marker_quantity', 1)
                         timestamp = st.session_state.get('nesting_timestamp', '')
 
+                        # 선택된 사이즈 정보 표시 (예: XS1,S1,M1,L1=4벌)
+                        selected_sizes = st.session_state.get('selected_sizes', [])
+                        if selected_sizes:
+                            size_parts = ','.join([f"{s}{marker_qty}" for s in selected_sizes])
+                            total_qty = len(selected_sizes) * marker_qty
+                            size_info = f"{size_parts}={total_qty}벌"
+                        else:
+                            size_info = f"{marker_qty}벌"
+
                         with col:
-                            with st.expander(f"📦 {fabric} ({marker_qty}벌) - {timestamp}", expanded=True):
+                            with st.expander(f"📦 {fabric}({size_info}) - {timestamp}", expanded=True):
                                 if result['success']:
                                     # 결과 메트릭 (5열: 패턴수, 원단폭, 마카길이, 요척, 효율)
                                     m1, m2, m3, m4, m5 = st.columns([1, 1, 1.2, 1, 0.8])
@@ -1594,9 +2199,16 @@ if uploaded_file is not None:
                                                     import time
                                                     start_time = time.time()
 
-                                                    # 해당 원단의 패턴만 필터링
-                                                    fabric_df = st.session_state.df[st.session_state.df['원단'] == fabric]
-                                                    fabric_indices = fabric_df.index.tolist()
+                                                    # 선택된 사이즈 + 해당 원단의 패턴만 필터링
+                                                    all_sizes = st.session_state.get('all_sizes', [])
+                                                    selected_sizes = st.session_state.get('selected_sizes', all_sizes)
+
+                                                    fabric_indices = []
+                                                    for idx, p_data in enumerate(patterns):
+                                                        size_name = p_data[3]
+                                                        if st.session_state.df.loc[idx, '원단'] == fabric:
+                                                            if not all_sizes or not size_name or size_name in selected_sizes:
+                                                                fabric_indices.append(idx)
 
                                                     # 패턴 데이터 수집
                                                     pattern_data = []
@@ -1604,10 +2216,12 @@ if uploaded_file is not None:
                                                         if idx < len(patterns):
                                                             row = st.session_state.df.loc[idx]
                                                             poly = patterns[idx][0]
+                                                            size_name = patterns[idx][3]
                                                             coords = list(poly.exterior.coords)[:-1]
                                                             coords_cm = [(p[0] / 10, p[1] / 10) for p in coords]
                                                             quantity = int(row['수량']) * new_qty
-                                                            pattern_id = str(row['구분'])[:10] if row['구분'] else f"P{idx+1}"
+                                                            base_id = str(row['구분'])[:12] if row['구분'] else f"P{idx+1}"
+                                                            pattern_id = f"{base_id}\n{size_name[:4]}" if size_name else base_id
                                                             pattern_data.append({
                                                                 'coords_cm': coords_cm,
                                                                 'quantity': quantity,
@@ -1684,18 +2298,27 @@ if uploaded_file is not None:
                                 best_efficiency = original_result.get('efficiency', 0)
                                 best_qty = original_qty
 
-                                # 해당 원단의 패턴 데이터 준비
-                                fabric_df = st.session_state.df[st.session_state.df['원단'] == fabric]
-                                fabric_indices = fabric_df.index.tolist()
+                                # 선택된 사이즈 + 해당 원단의 패턴 데이터 준비
+                                all_sizes = st.session_state.get('all_sizes', [])
+                                selected_sizes = st.session_state.get('selected_sizes', all_sizes)
+
+                                fabric_indices = []
+                                for idx, p_data in enumerate(patterns):
+                                    size_name = p_data[3]
+                                    if st.session_state.df.loc[idx, '원단'] == fabric:
+                                        if not all_sizes or not size_name or size_name in selected_sizes:
+                                            fabric_indices.append(idx)
 
                                 base_pattern_data = []
                                 for idx in fabric_indices:
                                     if idx < len(patterns):
                                         row = st.session_state.df.loc[idx]
                                         poly = patterns[idx][0]
+                                        size_name = patterns[idx][3]
                                         coords = list(poly.exterior.coords)[:-1]
                                         coords_cm = [(p[0] / 10, p[1] / 10) for p in coords]
-                                        pattern_id = str(row['구분'])[:10] if row['구분'] else f"P{idx+1}"
+                                        base_id = str(row['구분'])[:12] if row['구분'] else f"P{idx+1}"
+                                        pattern_id = f"{base_id}\n{size_name[:4]}" if size_name else base_id
                                         base_pattern_data.append({
                                             'coords_cm': coords_cm,
                                             'base_quantity': int(row['수량']),
