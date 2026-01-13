@@ -228,9 +228,22 @@ def create_sparrow_visualization(result, sheet_width_cm):
     # 색상 팔레트
     colors = plt.cm.Set3(range(12))
 
-    # 패턴 이름별 색상 매핑 (같은 패턴은 같은 색상)
-    unique_patterns = list(set(p['pattern_id'].split('_')[0] for p in result['placements']))
-    pattern_color_map = {name: colors[i % len(colors)] for i, name in enumerate(unique_patterns)}
+    # 사이즈 개수 확인
+    all_sizes = st.session_state.get('all_sizes', [])
+    selected_sizes = st.session_state.get('selected_sizes', all_sizes)
+    has_multiple_sizes = len(selected_sizes) >= 2
+
+    if has_multiple_sizes:
+        # 사이즈 2개 이상: 같은 사이즈는 같은 색상
+        # pattern_id에 저장된 사이즈는 4자로 잘려있으므로 앞 4자로 매핑
+        size_color_map = {}
+        for i, size in enumerate(selected_sizes):
+            size_color_map[size] = colors[i % len(colors)]
+            size_color_map[size[:4]] = colors[i % len(colors)]  # 잘린 버전도 매핑
+    else:
+        # 사이즈 1개: 같은 패턴은 같은 색상
+        unique_patterns = list(set(p['pattern_id'].split('\n')[0] for p in result['placements']))
+        pattern_color_map = {name: colors[i % len(colors)] for i, name in enumerate(unique_patterns)}
 
     # 패턴 그리기
     for i, p in enumerate(result['placements']):
@@ -239,8 +252,24 @@ def create_sparrow_visualization(result, sheet_width_cm):
             # coords는 이미 배치된 좌표
             xs = [c[0] for c in coords]
             ys = [c[1] for c in coords]
-            pattern_name = p['pattern_id'].split('_')[0]
-            color = pattern_color_map.get(pattern_name, colors[0])
+
+            # 색상 결정
+            if has_multiple_sizes:
+                # 사이즈별 색상 (pattern_id 형식: "패턴명\n사이즈_인덱스")
+                parts = p['pattern_id'].split('\n')
+                if len(parts) > 1:
+                    # "사이즈_인덱스"에서 사이즈만 추출 (마지막 _인덱스 제거)
+                    size_with_idx = parts[1].strip()
+                    size_part = size_with_idx.rsplit('_', 1)[0] if '_' in size_with_idx else size_with_idx
+                else:
+                    size_part = ''
+                # 매핑에서 색상 찾기
+                color = size_color_map.get(size_part, colors[i % len(colors)])
+            else:
+                # 패턴별 색상
+                pattern_name = p['pattern_id'].split('\n')[0]
+                color = pattern_color_map.get(pattern_name, colors[0])
+
             ax.fill(xs, ys, alpha=0.7, facecolor=color, edgecolor='black', linewidth=0.5)
 
             # 패턴 ID 표시 (중심점 계산 - Shapely centroid 사용)
@@ -252,7 +281,14 @@ def create_sparrow_visualization(result, sheet_width_cm):
             except:
                 cx = sum(xs) / len(xs)
                 cy = sum(ys) / len(ys)
-            label = pattern_name[:16]  # 사이즈 정보 포함
+            # 패턴ID에서 _인덱스 제거하여 "구분12자\n사이즈4자" 형식 유지
+            raw_id = p['pattern_id']
+            if '_' in raw_id.split('\n')[-1]:
+                # 마지막 _인덱스 제거
+                parts = raw_id.rsplit('_', 1)
+                label = parts[0]
+            else:
+                label = raw_id
             ax.text(cx, cy, label, ha='center', va='center', fontsize=4, fontweight='bold')
 
     ax.set_xlim(-1, sheet_width_cm + 1)
@@ -467,20 +503,97 @@ def export_nesting_to_excel(nesting_results, timestamp):
 
     current_row += 2  # 빈 줄 추가
 
-    # === 2. 원단별 마카 이미지 + 배치 상세 ===
-    for fabric, result in nesting_results.items():
-        if result.get('success'):
-            # 원단명 헤더
-            ws.cell(row=current_row, column=1, value=f"■ {fabric} 마카").font = section_font
-            current_row += 1
+    # === 2. 원단별 마카 이미지 + 배치 상세 (2열 배치) ===
+    ws.cell(row=current_row, column=1, value="■ 마카 이미지").font = section_font
+    current_row += 1
 
-            # 마카 이미지 삽입
+    fabric_list = [f for f, r in nesting_results.items() if r.get('success')]
+
+    # 배치 상세 테이블 추가 함수
+    def add_placement_table(start_row, start_col, fabric, result):
+        """마카 아래에 배치 상세 테이블 추가"""
+        row = start_row
+        if result.get('placements'):
+            ws.cell(row=row, column=start_col, value=f"배치 상세").font = Font(bold=True, size=9)
+            row += 1
+
+            placement_headers = ['번호', '패턴ID', 'X', 'Y', '회전']
+            for col_offset, header in enumerate(placement_headers):
+                cell = ws.cell(row=row, column=start_col + col_offset, value=header)
+                cell.font = Font(bold=True, size=8, color="FFFFFF")
+                cell.fill = PatternFill(start_color="70AD47", end_color="70AD47", fill_type="solid")
+                cell.border = thin_border
+                cell.alignment = Alignment(horizontal='center')
+            row += 1
+
+            for pi, p in enumerate(result['placements']):
+                row_data = [
+                    pi + 1,
+                    p.get('pattern_id', ''),
+                    round(p.get('x', 0), 1),
+                    round(p.get('y', 0), 1),
+                    p.get('rotation', 0)
+                ]
+                for col_offset, value in enumerate(row_data):
+                    cell = ws.cell(row=row, column=start_col + col_offset, value=value)
+                    cell.border = thin_border
+                    cell.alignment = Alignment(horizontal='center')
+                    cell.font = Font(size=8)
+                row += 1
+        return row
+
+    # 2개씩 묶어서 처리
+    for i in range(0, len(fabric_list), 2):
+        row_start = current_row
+        img_rows1 = 0
+        img_rows2 = 0
+
+        # 왼쪽 마카 (A열)
+        fabric1 = fabric_list[i]
+        result1 = nesting_results[fabric1]
+        ws.cell(row=current_row, column=1, value=f"▷ {fabric1}").font = Font(bold=True, size=11)
+
+        try:
+            width_cm = result1.get('width_cm', 150)
+            if result1.get('sparrow_mode'):
+                fig = create_sparrow_visualization(result1, width_cm)
+            else:
+                fig = create_nesting_visualization(result1, width_cm)
+
+            if fig:
+                img_buffer = BytesIO()
+                fig.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight',
+                           facecolor='white', edgecolor='none')
+                img_buffer.seek(0)
+                plt.close(fig)
+
+                img = XLImage(img_buffer)
+                orig_width = img.width
+                orig_height = img.height
+                if orig_width > 0:
+                    img.width = 450
+                    img.height = int(orig_height * (450 / orig_width))
+
+                ws.add_image(img, f'A{current_row + 1}')
+                img_rows1 = int(img.height / 15) + 2
+        except Exception as e:
+            ws.cell(row=current_row + 1, column=1, value=f"오류: {e}")
+            img_rows1 = 3
+
+        # 오른쪽 마카 (F열) - 있으면
+        fabric2 = None
+        result2 = None
+        if i + 1 < len(fabric_list):
+            fabric2 = fabric_list[i + 1]
+            result2 = nesting_results[fabric2]
+            ws.cell(row=current_row, column=6, value=f"▷ {fabric2}").font = Font(bold=True, size=11)
+
             try:
-                width_cm = result.get('width_cm', 150)
-                if result.get('sparrow_mode'):
-                    fig = create_sparrow_visualization(result, width_cm)
+                width_cm = result2.get('width_cm', 150)
+                if result2.get('sparrow_mode'):
+                    fig = create_sparrow_visualization(result2, width_cm)
                 else:
-                    fig = create_nesting_visualization(result, width_cm)
+                    fig = create_nesting_visualization(result2, width_cm)
 
                 if fig:
                     img_buffer = BytesIO()
@@ -490,50 +603,32 @@ def export_nesting_to_excel(nesting_results, timestamp):
                     plt.close(fig)
 
                     img = XLImage(img_buffer)
-                    # 이미지 크기 조정 (가로 700px 기준)
                     orig_width = img.width
                     orig_height = img.height
                     if orig_width > 0:
-                        img.width = 700
-                        img.height = int(orig_height * (700 / orig_width))
+                        img.width = 450
+                        img.height = int(orig_height * (450 / orig_width))
 
-                    ws.add_image(img, f'A{current_row}')
-                    # 이미지 높이에 맞춰 행 이동 (대략 이미지 높이 / 15)
-                    img_rows = max(int(img.height / 15), 10)
-                    current_row += img_rows + 1
+                    ws.add_image(img, f'F{current_row + 1}')
+                    img_rows2 = int(img.height / 15) + 2
             except Exception as e:
-                ws.cell(row=current_row, column=1, value=f"마카 이미지 생성 오류: {e}")
-                current_row += 2
+                ws.cell(row=current_row + 1, column=6, value=f"오류: {e}")
+                img_rows2 = 3
 
-            # 배치 상세 테이블
-            if result.get('placements'):
-                ws.cell(row=current_row, column=1, value=f"▷ {fabric} 배치 상세").font = Font(bold=True, size=11)
-                current_row += 1
+        # 마카 이미지 아래로 이동
+        max_img_rows = max(img_rows1, img_rows2, 10)
+        current_row += max_img_rows + 2  # 2칸 아래
 
-                placement_headers = ['번호', '패턴ID', 'X(cm)', 'Y(cm)', '회전(°)']
-                for col, header in enumerate(placement_headers, 1):
-                    cell = ws.cell(row=current_row, column=col, value=header)
-                    cell.font = header_font_white
-                    cell.fill = PatternFill(start_color="70AD47", end_color="70AD47", fill_type="solid")
-                    cell.border = thin_border
-                    cell.alignment = Alignment(horizontal='center')
-                current_row += 1
+        # 왼쪽 배치 상세 (A열)
+        detail_start_row = current_row
+        end_row1 = add_placement_table(current_row, 1, fabric1, result1)
 
-                for i, p in enumerate(result['placements']):
-                    row_data = [
-                        i + 1,
-                        p.get('pattern_id', ''),
-                        round(p.get('x', 0), 1),
-                        round(p.get('y', 0), 1),
-                        p.get('rotation', 0)
-                    ]
-                    for col, value in enumerate(row_data, 1):
-                        cell = ws.cell(row=current_row, column=col, value=value)
-                        cell.border = thin_border
-                        cell.alignment = Alignment(horizontal='center')
-                    current_row += 1
+        # 오른쪽 배치 상세 (F열) - 있으면
+        end_row2 = current_row
+        if fabric2 and result2:
+            end_row2 = add_placement_table(current_row, 6, fabric2, result2)
 
-            current_row += 2  # 원단별 구분 빈 줄
+        current_row = max(end_row1, end_row2) + 2
 
     # 열 너비 조정
     ws.column_dimensions['A'].width = 15
@@ -683,29 +778,24 @@ def create_overlay_visualization(patterns_group, selected_sizes, all_sizes):
         if not size_name:
             continue
 
-        # 중심점으로 이동 (중심 정렬)
-        poly_center = poly.centroid
-        dx = center_x - poly_center.x
-        dy = center_y - poly_center.y
-        moved_poly = affinity.translate(poly, xoff=dx, yoff=dy)
-
-        x, y = moved_poly.exterior.xy
+        # 원본 DXF 위치 그대로 사용 (중심 이동 없음)
+        x, y = poly.exterior.xy
 
         # 사이즈별 색상
         color = size_colors.get(size_name, 'gray')
         is_selected = size_name in selected_sizes
 
-        # 선택된 사이즈: 실선 (더 두껍게), 미선택: 점선+흐리게
+        # 선택된 사이즈: 실선, 미선택: 점선+흐리게
         if is_selected:
-            ax.plot(x, y, color=color, linewidth=1.5, linestyle='-', alpha=1.0)
+            ax.plot(x, y, color=color, linewidth=1.0, linestyle='-', alpha=1.0)
         else:
-            ax.plot(x, y, color=color, linewidth=0.8, linestyle='--', alpha=0.4)
+            ax.plot(x, y, color=color, linewidth=0.1, linestyle='--', alpha=0.4)
 
         # 범례용 핸들 (사이즈당 하나만)
         if size_name not in drawn_sizes:
             drawn_sizes.add(size_name)
             line = mlines.Line2D([], [], color=color,
-                                 linewidth=1.5 if is_selected else 0.8,
+                                 linewidth=1.0 if is_selected else 0.1,
                                  linestyle='-' if is_selected else '--',
                                  alpha=1.0 if is_selected else 0.5,
                                  label=size_name)
@@ -754,63 +844,107 @@ def check_symmetry(poly):
         return False, "오류"
 
 
-def check_horizontal_edges(poly):
+def check_vertical_straight_edge(poly, min_length_cm=50):
     """
-    패턴의 가로변(상단/하단)이 직선이거나 평행선인지 판별합니다.
-    조건1: 상단 또는 하단 중 한 변이 직선 (Y좌표 변화 1% 이내)
-    조건2: 상하단이 평행선 (가로 길이 비율 60% 이상)
+    패턴의 세로 직선(좌측/우측)이 특정 길이 이상인지 판별합니다.
+    min_length_cm 이상인 세로 직선이 1개라도 있으면 True 반환
     """
     try:
         coords = list(poly.exterior.coords)
         if len(coords) < 4:
-            return False, "점 부족"
+            return False
+
+        min_length_mm = min_length_cm * 10  # cm → mm 변환
+
+        # 연속된 점들 사이의 세로 직선 확인
+        for i in range(len(coords) - 1):
+            x1, y1 = coords[i]
+            x2, y2 = coords[i + 1]
+
+            # X좌표 변화가 거의 없으면 세로 직선
+            x_diff = abs(x2 - x1)
+            y_length = abs(y2 - y1)
+
+            # X좌표 변화가 전체 폭의 2% 이내이고, 세로 길이가 min_length 이상
+            minx, miny, maxx, maxy = poly.bounds
+            width = maxx - minx
+
+            if x_diff < width * 0.02 and y_length >= min_length_mm:
+                return True
+
+        return False
+    except:
+        return False
+
+
+def check_horizontal_straight_edge(poly):
+    """
+    패턴의 가로 직선(상단/하단)이 1개 이상 있는지 판별합니다.
+    상단 또는 하단 중 Y좌표 변화가 1% 이내인 직선이 있으면 True 반환
+    """
+    try:
+        coords = list(poly.exterior.coords)
+        if len(coords) < 4:
+            return False
 
         minx, miny, maxx, maxy = poly.bounds
         height = maxy - miny
-        width = maxx - minx
 
         # 상단/하단 영역 정의 (전체 높이의 10% 이내)
         top_threshold = maxy - height * 0.1
         bottom_threshold = miny + height * 0.1
 
-        # 상단/하단에 위치한 점들 추출
         top_points = [(x, y) for x, y in coords if y >= top_threshold]
         bottom_points = [(x, y) for x, y in coords if y <= bottom_threshold]
 
-        def is_straight_line(points, tolerance_ratio=0.01):
-            """점들이 직선(수평선)인지 판별 (Y좌표 변화가 거의 없음)"""
+        def is_straight_line(points):
             if len(points) < 2:
                 return False
             y_values = [p[1] for p in points]
             y_range = max(y_values) - min(y_values)
-            return y_range < height * tolerance_ratio
+            return y_range < height * 0.01
+
+        return is_straight_line(top_points) or is_straight_line(bottom_points)
+    except:
+        return False
+
+
+def check_parallel_edges(poly, similarity_threshold=0.85):
+    """
+    패턴의 상하단 가로선이 평행선인지 판별합니다.
+    상하단 가로 길이 비율이 similarity_threshold 이상이면 True 반환
+    """
+    try:
+        coords = list(poly.exterior.coords)
+        if len(coords) < 4:
+            return False
+
+        minx, miny, maxx, maxy = poly.bounds
+        height = maxy - miny
+
+        # 상단/하단 영역 정의 (전체 높이의 10% 이내)
+        top_threshold = maxy - height * 0.1
+        bottom_threshold = miny + height * 0.1
+
+        top_points = [(x, y) for x, y in coords if y >= top_threshold]
+        bottom_points = [(x, y) for x, y in coords if y <= bottom_threshold]
 
         def get_edge_length(points):
-            """점들의 X방향 너비 (가로 길이)"""
             if len(points) < 2:
                 return 0
             x_values = [p[0] for p in points]
             return max(x_values) - min(x_values)
 
-        # 조건1: 상단 또는 하단이 직선인지 확인
-        top_is_straight = is_straight_line(top_points)
-        bottom_is_straight = is_straight_line(bottom_points)
-
-        if top_is_straight or bottom_is_straight:
-            return True, "직선변"
-
-        # 조건2: 상하단이 평행선인지 확인 (길이 비율 60% 이상)
         top_length = get_edge_length(top_points)
         bottom_length = get_edge_length(bottom_points)
 
         if top_length > 0 and bottom_length > 0:
             similarity = min(top_length, bottom_length) / max(top_length, bottom_length)
-            if similarity >= 0.6:
-                return True, "평행선"
+            return similarity >= similarity_threshold
 
-        return False, "해당없음"
+        return False
     except:
-        return False, "오류"
+        return False
 
 
 # ==============================================================================
@@ -1135,6 +1269,7 @@ if uploaded_file is not None:
         os.remove(tmp_path) # 임시 파일 삭제
         st.session_state.patterns = patterns
         st.session_state.style_no = style_no
+        st.session_state.original_pattern_count = len(patterns)  # 원본 패턴 수 저장
         
         # 패턴 DB 로드 (수량 추천용)
         pattern_db = None
@@ -1192,23 +1327,39 @@ if uploaded_file is not None:
 
             if not db_used:
                 is_symmetric, sym_reason = check_symmetry(poly)
-                has_straight_edge, edge_reason = check_horizontal_edges(poly)
 
-                if is_symmetric and sym_reason == "좌우대칭" and w >= 35 and h <= 15 and has_straight_edge:
+                # 1. 좌우대칭 + 가로≥50cm + 세로≥45cm → BACK, 1개
+                if sym_reason == "좌우대칭" and w >= 50 and h >= 45:
                     count = 1
-                    default_desc = "BODY"
-                elif is_symmetric and sym_reason == "좌우대칭" and w >= 25 and h <= 15:
+                    default_desc = "BACK"
+                # 2. 좌우대칭 + 가로≥50cm + 세로≥20cm + 세로<45cm → BACK YOKE, 1개
+                elif sym_reason == "좌우대칭" and w >= 50 and h >= 20 and h < 45:
+                    count = 1
+                    default_desc = "BACK YOKE"
+                # 3. 가로≥25cm + 세로≥40cm + 세로직선(≥35cm) 1개 이상 → FRONT, 2개
+                elif w >= 25 and h >= 40 and check_vertical_straight_edge(poly, 35):
                     count = 2
-                    default_desc = "BODY/SLEEVE"
-                elif is_symmetric and w <= 25 and h <= 25:
+                    default_desc = "FRONT"
+                # 3. 좌우대칭 + 가로≥45cm + 세로≤15cm + 가로직선 1개 → BACK YOKE HEM, 1개
+                elif sym_reason == "좌우대칭" and w >= 45 and h <= 15 and check_horizontal_straight_edge(poly):
+                    count = 1
+                    default_desc = "BACK YOKE HEM"
+                # 5. 좌우대칭 + 가로≥50cm + 세로≤10cm + 평행선(85%) → BACK BOTTOM, 1개
+                elif sym_reason == "좌우대칭" and w >= 50 and h <= 10 and check_parallel_edges(poly, 0.85):
+                    count = 1
+                    default_desc = "BACK BOTTOM"
+                # 6. 좌우대칭 + 가로≤25cm + 세로≤15cm → FLAP, 4개
+                elif sym_reason == "좌우대칭" and w <= 25 and h <= 15:
                     count = 4
                     default_desc = "FLAP"
-                elif is_symmetric:
-                    count = 1
-                    default_desc = "BODY"
+                # 7. 상하대칭 + 가로≤26cm + 세로≤12cm → SLEEVE TAB, 4개
+                elif sym_reason == "상하대칭" and w <= 26 and h <= 12:
+                    count = 4
+                    default_desc = "SLEEVE TAB"
+                # 8. 나머지 → 확인, 2개
                 else:
                     count = 2
-                    default_desc = "BODY/SLEEVE"
+                    default_desc = "확인"
 
             if db_used:
                 desc = default_desc
@@ -1244,6 +1395,8 @@ if uploaded_file is not None:
                 "면적_raw": info['poly'].area / 1000000
             })
         st.session_state.df = pd.DataFrame(data_list)
+        # 원단별 정렬 (기본 정렬)
+        st.session_state.df = st.session_state.df.sort_values(by=['원단', '번호']).reset_index(drop=True)
         # 체크박스 상태 초기화
         for i in range(len(patterns)): st.session_state[f"chk_{i}"] = False
 
@@ -1295,10 +1448,15 @@ if uploaded_file is not None:
 
             # 중첩 시각화
             with st.expander("🔍 사이즈 중첩 비교", expanded=True):
-                # 패턴 그룹별로 분류 (데이터프레임 번호 기준)
+                # 패턴 그룹별로 분류 (데이터프레임 번호 기준) - 복사 패턴 제외
                 from collections import defaultdict
+                original_count = st.session_state.get('original_pattern_count', len(patterns))
                 pattern_groups = defaultdict(list)
                 for idx, p_data in enumerate(patterns):
+                    # 복사된 패턴은 제외 (원본 패턴 수 이후 인덱스)
+                    if idx >= original_count:
+                        continue
+
                     poly, pattern_name, fabric_name, size_name, pattern_group = p_data
                     if size_name:  # 사이즈가 있는 패턴만
                         # 데이터프레임의 번호를 사용하여 그룹화
@@ -1537,7 +1695,9 @@ if uploaded_file is not None:
             for col_idx in range(cols_per_row):
                 list_idx = row * cols_per_row + col_idx
                 if list_idx < len(filtered_patterns):
-                    orig_idx, p, pattern_name, current_fabric, size_name, _ = filtered_patterns[list_idx]
+                    orig_idx, p, pattern_name, _, size_name, _ = filtered_patterns[list_idx]
+                    # 원단명은 df에서 가져오기 (일괄수정 반영)
+                    current_fabric = st.session_state.df.at[orig_idx, "원단"] if orig_idx < len(st.session_state.df) else "겉감"
                     with cols[col_idx]:
                         # Matplotlib 썸네일 생성 (가볍고 빠름)
                         fig, ax = plt.subplots(figsize=(1, 1))
@@ -1949,8 +2109,14 @@ if uploaded_file is not None:
         # 원단별 설정
         fabric_list = st.session_state.df['원단'].unique().tolist()
         fabric_widths = {}
-        marker_quantities = {}
+        marker_quantities = {}  # 원단별 벌수 (사이즈 없을 때 사용)
+        size_quantities = {}    # 사이즈별 벌수
         target_efficiencies = {}
+
+        # 사이즈 목록 확인
+        all_sizes = st.session_state.get('all_sizes', [])
+        selected_sizes = st.session_state.get('selected_sizes', all_sizes)
+        has_multiple_sizes = len(selected_sizes) >= 2
 
         # 2컬럼 레이아웃: 왼쪽(공통설정) | 오른쪽(180도회전 + 원단별설정)
         left_col, right_col = st.columns(2)
@@ -2036,8 +2202,25 @@ if uploaded_file is not None:
                         "벌수",
                         min_value=1, max_value=10, value=1,
                         key=f"marker_qty_{i}",
-                        label_visibility="collapsed"
+                        label_visibility="collapsed",
+                        disabled=has_multiple_sizes  # 사이즈별 벌수 사용시 비활성화
                     )
+
+            # 사이즈별 벌수 설정 (사이즈가 2개 이상일 때만 표시)
+            if has_multiple_sizes:
+                st.markdown("---")
+                st.markdown("**📏 사이즈별 벌수**")
+
+                # 사이즈별 벌수 입력 (가로 배치)
+                size_cols = st.columns(len(selected_sizes))
+                for si, size in enumerate(selected_sizes):
+                    with size_cols[si]:
+                        size_quantities[size] = st.number_input(
+                            size,
+                            min_value=0, max_value=10, value=1,
+                            key=f"size_qty_{si}",
+                            help=f"{size} 사이즈 벌수 (0=제외)"
+                        )
 
         if run_nesting:
             import time
@@ -2078,7 +2261,16 @@ if uploaded_file is not None:
                                 size_name = patterns[idx][3]  # 사이즈 정보
                                 coords = list(poly.exterior.coords)[:-1]
                                 coords_cm = [(p[0] / 10, p[1] / 10) for p in coords]
-                                quantity = int(row['수량']) * fabric_marker_qty
+
+                                # 사이즈별 벌수 적용 (사이즈 2개 이상일 때)
+                                if has_multiple_sizes and size_name:
+                                    size_qty = size_quantities.get(size_name, 1)
+                                    if size_qty == 0:  # 벌수 0이면 제외
+                                        continue
+                                    quantity = int(row['수량']) * size_qty
+                                else:
+                                    quantity = int(row['수량']) * fabric_marker_qty
+
                                 # 패턴ID에 사이즈 정보 포함 (구분 12자 + 사이즈 4자)
                                 base_id = str(row['구분'])[:12] if row['구분'] else f"P{idx+1}"
                                 pattern_id = f"{base_id}\n{size_name[:4]}" if size_name else base_id
@@ -2116,6 +2308,8 @@ if uploaded_file is not None:
                         result['fabric'] = fabric
                         result['width_cm'] = width_cm
                         result['marker_quantity'] = fabric_marker_qty
+                        result['size_quantities'] = size_quantities if has_multiple_sizes else {}
+                        result['has_multiple_sizes'] = has_multiple_sizes
                         nesting_results[fabric] = result
 
                     # 결과 저장 (작업일시 + 실행시간 추가)
@@ -2147,10 +2341,18 @@ if uploaded_file is not None:
                         marker_qty = result.get('marker_quantity', 1)
                         timestamp = st.session_state.get('nesting_timestamp', '')
 
-                        # 선택된 사이즈 정보 표시 (예: XS1,S1,M1,L1=4벌)
+                        # 선택된 사이즈 정보 표시 (예: S/2,M/3=5벌)
                         selected_sizes = st.session_state.get('selected_sizes', [])
-                        if selected_sizes:
-                            size_parts = ','.join([f"{s}{marker_qty}" for s in selected_sizes])
+                        result_size_qty = result.get('size_quantities', {})
+                        result_has_multi = result.get('has_multiple_sizes', False)
+
+                        if selected_sizes and result_has_multi and result_size_qty:
+                            # 사이즈별 벌수 표시
+                            size_parts = ','.join([f"{s}/{result_size_qty.get(s, 1)}" for s in selected_sizes if result_size_qty.get(s, 1) > 0])
+                            total_qty = sum(result_size_qty.get(s, 1) for s in selected_sizes if result_size_qty.get(s, 1) > 0)
+                            size_info = f"{size_parts}={total_qty}벌"
+                        elif selected_sizes:
+                            size_parts = ','.join([f"{s}/{marker_qty}" for s in selected_sizes])
                             total_qty = len(selected_sizes) * marker_qty
                             size_info = f"{size_parts}={total_qty}벌"
                         else:
@@ -2183,16 +2385,42 @@ if uploaded_file is not None:
 
                                     # 재네스팅 옵션
                                     st.markdown("---")
-                                    re_col1, re_col2 = st.columns([1, 1])
-                                    with re_col1:
-                                        new_qty = st.number_input(
-                                            "벌수 변경",
-                                            min_value=1, max_value=10,
-                                            value=marker_qty,
-                                            key=f"re_qty_{fabric}_{i+j}"
-                                        )
-                                    with re_col2:
-                                        if st.button("🔄 재네스팅", key=f"re_nest_{fabric}_{i+j}", use_container_width=True):
+
+                                    # 사이즈별 벌수 설정 (사이즈 2개 이상일 때)
+                                    re_all_sizes = st.session_state.get('all_sizes', [])
+                                    re_selected_sizes = st.session_state.get('selected_sizes', re_all_sizes)
+                                    re_has_multi = len(re_selected_sizes) >= 2
+
+                                    re_size_quantities = {}
+                                    if re_has_multi:
+                                        st.markdown("**사이즈별 벌수**")
+                                        re_size_cols = st.columns(len(re_selected_sizes))
+                                        for si, size in enumerate(re_selected_sizes):
+                                            with re_size_cols[si]:
+                                                re_size_quantities[size] = st.number_input(
+                                                    size,
+                                                    min_value=0, max_value=10, value=1,
+                                                    key=f"re_sz_{fabric}_{size}_{i+j}",
+                                                    help=f"{size} 벌수 (0=제외)"
+                                                )
+
+                                    # 벌수 변경 (사이즈 1개일 때만 표시)
+                                    if not re_has_multi:
+                                        re_col1, re_col2 = st.columns([1, 1])
+                                        with re_col1:
+                                            new_qty = st.number_input(
+                                                "벌수 변경",
+                                                min_value=1, max_value=10,
+                                                value=marker_qty,
+                                                key=f"re_qty_{fabric}_{i+j}"
+                                            )
+                                        with re_col2:
+                                            re_nest_btn = st.button("🔄 재네스팅", key=f"re_nest_{fabric}_{i+j}", use_container_width=True)
+                                    else:
+                                        new_qty = 1  # 사이즈별 벌수 사용 시 기본값
+                                        re_nest_btn = st.button("🔄 재네스팅", key=f"re_nest_{fabric}_{i+j}", use_container_width=True)
+
+                                    if re_nest_btn:
                                             # 해당 원단만 재네스팅
                                             with st.spinner(f"🐦 {fabric} 재네스팅 중..."):
                                                 try:
@@ -2219,7 +2447,16 @@ if uploaded_file is not None:
                                                             size_name = patterns[idx][3]
                                                             coords = list(poly.exterior.coords)[:-1]
                                                             coords_cm = [(p[0] / 10, p[1] / 10) for p in coords]
-                                                            quantity = int(row['수량']) * new_qty
+
+                                                            # 사이즈별 벌수 적용
+                                                            if re_has_multi and size_name:
+                                                                sz_qty = re_size_quantities.get(size_name, 1)
+                                                                if sz_qty == 0:
+                                                                    continue
+                                                                quantity = int(row['수량']) * sz_qty
+                                                            else:
+                                                                quantity = int(row['수량']) * new_qty
+
                                                             base_id = str(row['구분'])[:12] if row['구분'] else f"P{idx+1}"
                                                             pattern_id = f"{base_id}\n{size_name[:4]}" if size_name else base_id
                                                             pattern_data.append({
@@ -2258,6 +2495,8 @@ if uploaded_file is not None:
                                                     new_result['fabric'] = fabric
                                                     new_result['width_cm'] = width_cm
                                                     new_result['marker_quantity'] = new_qty
+                                                    new_result['size_quantities'] = re_size_quantities if re_has_multi else {}
+                                                    new_result['has_multiple_sizes'] = re_has_multi
 
                                                     # 결과 업데이트
                                                     st.session_state.nesting_results[fabric] = new_result
