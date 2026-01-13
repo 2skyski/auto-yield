@@ -410,6 +410,13 @@ st.markdown("""
         padding: 15px !important;
         background: linear-gradient(135deg, #f0f7ff 0%, #e8f4f8 100%) !important;
     }
+    [data-testid="stFileUploader"] section,
+    .stFileUploader section {
+        min-height: 200px !important;
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: center !important;
+    }
     [data-testid="stFileUploader"] label,
     .stFileUploader label {
         font-size: 16px !important;
@@ -721,7 +728,7 @@ def poly_to_base64(poly, fill_color='gray'):
     return f"data:image/png;base64,{data}"
 
 
-def create_overlay_visualization(patterns_group, selected_sizes, all_sizes):
+def create_overlay_visualization(patterns_group, selected_sizes, all_sizes, global_max_dim=None):
     """
     동일 패턴 그룹의 여러 사이즈를 중첩하여 시각화
     - 바탕색 없이 외곽선만 표시
@@ -732,6 +739,7 @@ def create_overlay_visualization(patterns_group, selected_sizes, all_sizes):
         patterns_group: [(poly, pattern_name, fabric_name, size_name, pattern_group), ...] 동일 그룹
         selected_sizes: 선택된 사이즈 목록
         all_sizes: 전체 사이즈 목록
+        global_max_dim: 전역 최대 크기 (모든 패턴에 동일 비율 적용)
 
     Returns:
         matplotlib figure
@@ -801,10 +809,18 @@ def create_overlay_visualization(patterns_group, selected_sizes, all_sizes):
                                  label=size_name)
             legend_handles.append(line)
 
-    # 축 설정
-    margin = max(max_x - min_x, max_y - min_y) * 0.15
-    ax.set_xlim(min_x - margin, max_x + margin)
-    ax.set_ylim(min_y - margin, max_y + margin)
+    # 축 설정 - 전역 최대 크기 사용 (모든 패턴 동일 비율)
+    if global_max_dim:
+        # 전역 크기 기준으로 뷰포트 설정
+        margin = global_max_dim * 0.15
+        half_dim = global_max_dim / 2 + margin
+        ax.set_xlim(center_x - half_dim, center_x + half_dim)
+        ax.set_ylim(center_y - half_dim, center_y + half_dim)
+    else:
+        # 개별 패턴 크기 기준 (기존 방식)
+        margin = max(max_x - min_x, max_y - min_y) * 0.15
+        ax.set_xlim(min_x - margin, max_x + margin)
+        ax.set_ylim(min_y - margin, max_y + margin)
     ax.set_aspect('equal')
     ax.axis('off')
 
@@ -1395,8 +1411,11 @@ if uploaded_file is not None:
                 "면적_raw": info['poly'].area / 1000000
             })
         st.session_state.df = pd.DataFrame(data_list)
-        # 원단별 정렬 (기본 정렬)
-        st.session_state.df = st.session_state.df.sort_values(by=['원단', '번호']).reset_index(drop=True)
+        # 원단별 정렬 (기본 정렬) - patterns 리스트도 동기화
+        sort_indices = st.session_state.df.sort_values(by=['원단', '번호']).index.tolist()
+        st.session_state.patterns = [st.session_state.patterns[i] for i in sort_indices]
+        st.session_state.df = st.session_state.df.iloc[sort_indices].reset_index(drop=True)
+        st.session_state.df["번호"] = range(1, len(st.session_state.df) + 1)  # 번호 순차 재설정
         # 체크박스 상태 초기화
         for i in range(len(patterns)): st.session_state[f"chk_{i}"] = False
 
@@ -1459,10 +1478,9 @@ if uploaded_file is not None:
 
                     poly, pattern_name, fabric_name, size_name, pattern_group = p_data
                     if size_name:  # 사이즈가 있는 패턴만
-                        # 데이터프레임의 번호를 사용하여 그룹화
-                        if idx < len(st.session_state.df):
-                            df_num = st.session_state.df.at[idx, "번호"]
-                            group_key = f"패턴 {df_num}"
+                        # pattern_group (DXF 블록명에서 추출된 번호)을 사용하여 그룹화
+                        if pattern_group:
+                            group_key = f"패턴 {pattern_group}"
                         elif pattern_name:
                             group_key = pattern_name
                         else:
@@ -1470,6 +1488,16 @@ if uploaded_file is not None:
                         pattern_groups[group_key].append(p_data)
 
                 if pattern_groups:
+                    # 전역 최대 크기 계산 (모든 패턴에 동일 비율 적용)
+                    global_max_dim = 0
+                    for group_patterns in pattern_groups.values():
+                        for p_data in group_patterns:
+                            poly = p_data[0]
+                            minx, miny, maxx, maxy = poly.bounds
+                            max_dim = max(maxx - minx, maxy - miny)
+                            if max_dim > global_max_dim:
+                                global_max_dim = max_dim
+
                     # 그룹 수에 따라 컬럼 조정 (최대 6열)
                     num_groups = len(pattern_groups)
                     num_cols = min(num_groups, 6)
@@ -1497,7 +1525,8 @@ if uploaded_file is not None:
                                 fig = create_overlay_visualization(
                                     group_patterns,
                                     st.session_state.selected_sizes,
-                                    all_sizes
+                                    all_sizes,
+                                    global_max_dim
                                 )
                                 st.pyplot(fig, use_container_width=True)
                                 plt.close(fig)
@@ -1711,9 +1740,8 @@ if uploaded_file is not None:
                         st.pyplot(fig, use_container_width=True)
                         plt.close(fig)  # 메모리 해제
 
-                        # 팝업 호출 버튼 (번호만 표시, 사이즈는 사이즈선택 UI에서 선택됨)
-                        pattern_num = st.session_state.df.at[orig_idx, "번호"] if orig_idx < len(st.session_state.df) else orig_idx+1
-                        btn_label = f"{pattern_num}"
+                        # 팝업 호출 버튼 (순차 번호 표시)
+                        btn_label = f"{list_idx + 1}"
                         if st.button(btn_label, key=f"btn_zoom_{orig_idx}", use_container_width=True):
                             show_detail_viewer(orig_idx, p, current_fabric)
 
@@ -1779,6 +1807,7 @@ if uploaded_file is not None:
             if "사이즈" in display_df.columns:
                 display_df = display_df.drop(columns=["사이즈"])
             display_df = display_df.reset_index(drop=True)
+            display_df["번호"] = range(1, len(display_df) + 1)  # 번호 순차 재설정
 
             edited_df = st.data_editor(
                 display_df,
