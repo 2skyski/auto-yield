@@ -1352,13 +1352,18 @@ def create_nesting_visualization(result, sheet_width_cm):
         )
         ax.add_patch(poly)
 
-        # 패턴 ID 표시
-        cx = sum(p[0] for p in coords) / len(coords)
-        cy = sum(p[1] for p in coords) / len(coords)
-        text_kwargs = {'ha': 'center', 'va': 'center', 'fontsize': 6, 'color': 'white', 'weight': 'bold'}
+        # 패턴 ID 표시 (중심점 계산 - Shapely centroid 사용)
+        try:
+            poly_shape = ShapelyPolygon(coords)
+            centroid = poly_shape.centroid
+            cx, cy = centroid.x, centroid.y
+        except:
+            cx = sum(p[0] for p in coords) / len(coords)
+            cy = sum(p[1] for p in coords) / len(coords)
+        text_kwargs = {'ha': 'center', 'va': 'center', 'fontsize': 4, 'color': 'white', 'weight': 'bold'}
         if font_prop:
             text_kwargs['fontproperties'] = font_prop
-        ax.text(cx, cy, pattern_name[:6], **text_kwargs)
+        ax.text(cx, cy, pattern_name[:17], **text_kwargs)
 
     # 축 설정
     ax.set_xlim(-50, sheet_width_cm * 10 + 50)

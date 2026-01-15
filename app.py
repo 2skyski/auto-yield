@@ -1701,35 +1701,46 @@ if uploaded_file is not None:
         # A. 사이즈 선택 UI (그레이딩된 DXF용)
         # ----------------------------------------------------------------
         all_sizes = st.session_state.get('all_sizes', [])
-        if len(all_sizes) > 1:
-            st.markdown("#### 📐 사이즈 선택")
+        if len(all_sizes) >= 1:
+            # 기준사이즈 정보 표시
+            base_size = st.session_state.get('base_size')
+            detected_base = st.session_state.get('detected_base_size')
+            source_info = "(원본)" if detected_base and detected_base == base_size else "(중간)"
 
-            # 사이즈 선택 체크박스
-            size_cols = st.columns(min(len(all_sizes) + 2, 10))
+            if len(all_sizes) == 1:
+                # 사이즈가 1개일 때: 간단한 정보만 표시
+                st.markdown(f"#### 📐 사이즈: **{all_sizes[0]}** {source_info}")
+                st.session_state.selected_sizes = all_sizes.copy()
+            else:
+                # 사이즈가 2개 이상일 때: 선택 UI 표시
+                st.markdown(f"#### 📐 사이즈 선택 (기준: **{base_size}** {source_info})")
 
-            # 전체 선택/해제 버튼
-            with size_cols[0]:
-                if st.button("✅전체", key="size_all", width='stretch'):
-                    st.session_state.selected_sizes = all_sizes.copy()
+                # 사이즈 선택 체크박스
+                size_cols = st.columns(min(len(all_sizes) + 2, 10))
+
+                # 전체 선택/해제 버튼
+                with size_cols[0]:
+                    if st.button("✅전체", key="size_all", width='stretch'):
+                        st.session_state.selected_sizes = all_sizes.copy()
+                        st.rerun()
+                with size_cols[1]:
+                    if st.button("⬜해제", key="size_none", width='stretch'):
+                        st.session_state.selected_sizes = []
+                        st.rerun()
+
+                # 개별 사이즈 체크박스
+                selected_sizes = st.session_state.get('selected_sizes', all_sizes)
+                new_selected = []
+                for idx, size in enumerate(all_sizes):
+                    with size_cols[idx + 2] if idx + 2 < len(size_cols) else size_cols[-1]:
+                        if st.checkbox(size, value=(size in selected_sizes), key=f"sz_{size}"):
+                            new_selected.append(size)
+
+                if new_selected != selected_sizes:
+                    st.session_state.selected_sizes = new_selected
                     st.rerun()
-            with size_cols[1]:
-                if st.button("⬜해제", key="size_none", width='stretch'):
-                    st.session_state.selected_sizes = []
-                    st.rerun()
 
-            # 개별 사이즈 체크박스
-            selected_sizes = st.session_state.get('selected_sizes', all_sizes)
-            new_selected = []
-            for idx, size in enumerate(all_sizes):
-                with size_cols[idx + 2] if idx + 2 < len(size_cols) else size_cols[-1]:
-                    if st.checkbox(size, value=(size in selected_sizes), key=f"sz_{size}"):
-                        new_selected.append(size)
-
-            if new_selected != selected_sizes:
-                st.session_state.selected_sizes = new_selected
-                st.rerun()
-
-            st.markdown(f"**선택된 사이즈:** {', '.join(st.session_state.selected_sizes) if st.session_state.selected_sizes else '없음'}")
+                st.markdown(f"**선택된 사이즈:** {', '.join(st.session_state.selected_sizes) if st.session_state.selected_sizes else '없음'}")
 
             # 중첩 시각화
             with st.expander("🔍 사이즈 중첩 비교", expanded=True):
