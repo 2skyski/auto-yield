@@ -708,24 +708,62 @@ def poly_to_base64(poly, fill_color='gray'):
     ax.plot(x, y, 'k-', lw=2)
     ax.fill(x, y, fill_color, alpha=0.6) # 색상 적용 (투명도 약간 높임)
     ax.axis('off')
-    
+
     # 정사각형 비율 맞추기 (Centering)
     minx, miny, maxx, maxy = poly.bounds
     cx, cy = (minx + maxx) / 2, (miny + maxy) / 2
     max_dim = max(maxx - minx, maxy - miny)
     padding = max_dim * 0.1 # 10% 여백
     span = (max_dim + padding) / 2
-    
+
     ax.set_xlim(cx - span, cx + span)
     ax.set_ylim(cy - span, cy + span)
     ax.set_aspect('equal')
-    
+
     buf = io.BytesIO()
     fig.savefig(buf, format='png', transparent=True, bbox_inches='tight', pad_inches=0)
     plt.close(fig)
-    
+
     data = base64.b64encode(buf.getvalue()).decode("utf-8")
     return f"data:image/png;base64,{data}"
+
+
+def get_cached_thumbnail(idx, poly, fabric_name, zoom_span):
+    """
+    썸네일 캐싱 함수: (인덱스, 원단명) 조합으로 캐시 관리
+    원단명이 변경되면 해당 썸네일만 새로 생성
+    """
+    # 캐시 초기화
+    if 'thumbnail_cache' not in st.session_state:
+        st.session_state.thumbnail_cache = {}
+
+    # 캐시 키: (인덱스, 원단명)
+    cache_key = (idx, fabric_name)
+
+    # 캐시에 있으면 재사용
+    if cache_key in st.session_state.thumbnail_cache:
+        return st.session_state.thumbnail_cache[cache_key]
+
+    # 없으면 새로 생성
+    fig, ax = plt.subplots(figsize=(1, 1))
+    x, y = poly.exterior.xy
+    ax.plot(x, y, 'k-', lw=0.5)
+    ax.fill(x, y, color=get_fabric_color_hex(fabric_name), alpha=0.6)
+    ax.set_xlim(poly.centroid.x - zoom_span/2, poly.centroid.x + zoom_span/2)
+    ax.set_ylim(poly.centroid.y - zoom_span/2, poly.centroid.y + zoom_span/2)
+    ax.set_aspect('equal')
+    ax.axis('off')
+
+    # BytesIO로 이미지 저장
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', transparent=True, bbox_inches='tight', pad_inches=0, dpi=72)
+    plt.close(fig)
+    buf.seek(0)
+
+    # 캐시에 저장
+    st.session_state.thumbnail_cache[cache_key] = buf.getvalue()
+
+    return st.session_state.thumbnail_cache[cache_key]
 
 
 def create_overlay_visualization(patterns_group, selected_sizes, all_sizes, global_max_dim=None):
@@ -1468,6 +1506,7 @@ if uploaded_file is not None:
         st.session_state.detected_base_size = detected_base_size  # DXF에서 추출한 기준사이즈
         st.session_state.style_no = style_no
         st.session_state.original_pattern_count = len(patterns)  # 원본 패턴 수 저장
+        st.session_state.thumbnail_cache = {}  # 썸네일 캐시 초기화
         
         # 패턴 DB 로드 (수량 추천용)
         pattern_db = None
@@ -2013,17 +2052,9 @@ if uploaded_file is not None:
                     # 원단명은 df에서 가져오기 (일괄수정 반영)
                     current_fabric = st.session_state.df.at[orig_idx, "원단"] if orig_idx < len(st.session_state.df) else "겉감"
                     with cols[col_idx]:
-                        # Matplotlib 썸네일 생성 (가볍고 빠름)
-                        fig, ax = plt.subplots(figsize=(1, 1))
-                        x, y = p.exterior.xy
-                        ax.plot(x, y, 'k-', lw=0.5)
-                        ax.fill(x, y, color=get_fabric_color_hex(current_fabric), alpha=0.6)
-                        # 비율 고정 및 축 숨김
-                        ax.set_xlim(p.centroid.x - zoom_span/2, p.centroid.x + zoom_span/2)
-                        ax.set_ylim(p.centroid.y - zoom_span/2, p.centroid.y + zoom_span/2)
-                        ax.set_aspect('equal'); ax.axis('off')
-                        st.pyplot(fig, width='stretch')
-                        plt.close(fig)  # 메모리 해제
+                        # 캐싱된 썸네일 사용 (깜빡임 방지)
+                        thumbnail_data = get_cached_thumbnail(orig_idx, p, current_fabric, zoom_span)
+                        st.image(thumbnail_data, use_container_width=True)
 
                         # 팝업 호출 버튼 (순차 번호 표시)
                         btn_label = f"{list_idx + 1}"
