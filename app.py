@@ -730,15 +730,17 @@ def poly_to_base64(poly, fill_color='gray'):
 
 def get_cached_thumbnail(idx, poly, fabric_name, zoom_span):
     """
-    썸네일 캐싱 함수: (인덱스, 원단명) 조합으로 캐시 관리
+    썸네일 캐싱 함수: (폴리곤 고유ID, 원단명) 조합으로 캐시 관리
     원단명이 변경되면 해당 썸네일만 새로 생성
+    복사/정렬 후에도 폴리곤 형상으로 정확히 매칭
     """
     # 캐시 초기화
     if 'thumbnail_cache' not in st.session_state:
         st.session_state.thumbnail_cache = {}
 
-    # 캐시 키: (인덱스, 원단명)
-    cache_key = (idx, fabric_name)
+    # 캐시 키: (폴리곤 면적 + 중심점 해시, 원단명) - 폴리곤 형상 기반 고유 식별
+    poly_id = (round(poly.area, 2), round(poly.centroid.x, 2), round(poly.centroid.y, 2))
+    cache_key = (poly_id, fabric_name)
 
     # 캐시에 있으면 재사용
     if cache_key in st.session_state.thumbnail_cache:
