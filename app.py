@@ -41,7 +41,7 @@ except ImportError:
     SPARROW_AVAILABLE = False
 
 
-def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spacing, allow_mirror=False):
+def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spacing, allow_mirror=False, buffer_mm=0):
     """
     Sparrow 네스팅 실행
 
@@ -52,6 +52,7 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         allow_rotation: 180도 회전 허용 여부
         spacing: 패턴 간격 (mm) - cm로 변환하여 적용
         allow_mirror: 뒤집기(좌우 미러링) 허용 여부
+        buffer_mm: 패턴 둘레 버퍼 (mm) - 패턴 외곽으로 확장하여 블로킹
 
     Returns:
         네스팅 결과 딕셔너리
@@ -60,6 +61,11 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
     items = []
     total_area = 0
     item_idx = 0
+    buffer_cm = buffer_mm / 10  # mm -> cm
+
+    # 원본 좌표 저장 (버퍼 시각화용)
+    original_shapes = {}  # id -> 원본 좌표 (Sparrow 좌표계)
+    grainline_data = {}  # id -> 그레인라인 좌표 (Sparrow 좌표계)
 
     for p in pattern_data:
         coords = list(p['coords_cm'])
@@ -67,9 +73,21 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         if coords[0] != coords[-1]:
             coords = coords + [coords[0]]
 
+        # 원본 좌표 저장 (버퍼 적용 전)
+        original_coords = coords.copy()
+
+        # 버퍼 적용 (패턴 둘레 확장)
+        if buffer_cm > 0:
+            from shapely.geometry import Polygon as ShapelyPolygon
+            poly = ShapelyPolygon(coords)
+            buffered_poly = poly.buffer(buffer_cm, join_style=2)  # join_style=2: mitre (각진 모서리)
+            if buffered_poly.is_valid and not buffered_poly.is_empty:
+                coords = list(buffered_poly.exterior.coords)
+
         # 좌표 변환: DXF(X=폭, Y=길이) → Sparrow(X=길이, Y=폭)
         # 입력시 X와 Y를 교환하여 Sparrow가 올바르게 처리하도록 함
         swapped_coords = [(y, x) for x, y in coords]
+        swapped_original = [(y, x) for x, y in original_coords]  # 원본도 변환
 
         # 좌우 미러링된 좌표 생성 (Y축 반전) - 좌/우 패턴 짝 배치용
         # Sparrow 좌표계: X=마카길이, Y=원단폭
@@ -77,20 +95,45 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         ys = [c[1] for c in swapped_coords]
         center_y = (min(ys) + max(ys)) / 2
         mirrored_coords = [(x, 2 * center_y - y) for x, y in swapped_coords]
+        mirrored_original = [(x, 2 * center_y - y) for x, y in swapped_original]  # 원본도 미러링
+
+        # 그레인라인 좌표 변환 (Sparrow 좌표계)
+        grainline_cm = p.get('grainline_cm')
+        swapped_grainline = None
+        mirrored_grainline = None
+        if grainline_cm:
+            gl_start, gl_end = grainline_cm
+            # DXF(X,Y) → Sparrow(Y,X) 좌표 교환
+            swapped_grainline = ((gl_start[1], gl_start[0]), (gl_end[1], gl_end[0]))
+            # 미러링된 그레인라인 (Y축 반전)
+            mirrored_grainline = (
+                (gl_start[1], 2 * center_y - gl_start[0]),
+                (gl_end[1], 2 * center_y - gl_end[0])
+            )
 
         # 수량만큼 아이템 생성
         for q in range(p['quantity']):
             unique_id = f"{p['pattern_id']}_{item_idx}"
-            
+
             # 180도 회전 옵션 (항상 독립 적용)
             orientations = [0, 180] if allow_rotation else [0]
-            
+
             # 좌우 마주 보기 옵션 (180도 회전과 독립)
             if allow_mirror:
                 use_coords = mirrored_coords if (q % 2 == 1) else swapped_coords
+                use_original = mirrored_original if (q % 2 == 1) else swapped_original
+                use_grainline = mirrored_grainline if (q % 2 == 1) else swapped_grainline
             else:
                 use_coords = swapped_coords
-            
+                use_original = swapped_original
+                use_grainline = swapped_grainline
+
+            # 원본 좌표 저장
+            original_shapes[unique_id] = use_original
+            # 그레인라인 좌표 저장
+            if use_grainline:
+                grainline_data[unique_id] = use_grainline
+
             item = spyrrow.Item(
                 id=unique_id,
                 shape=use_coords,
@@ -126,10 +169,11 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
     # 배치 정보 추출
     # PlacedItem: id, rotation, translation (x, y)
     placements = []
-    item_shapes = {item.id: item.shape for item in items}  # ID -> 원본 좌표 매핑
+    item_shapes = {item.id: item.shape for item in items}  # ID -> 버퍼 좌표 매핑
 
     for placed in solution.placed_items:
-        original_shape = item_shapes.get(placed.id, [])
+        buffered_shape = item_shapes.get(placed.id, [])
+        original_shape = original_shapes.get(placed.id, [])  # 원본 좌표 (버퍼 전)
         rotation = placed.rotation
         tx, ty = placed.translation
 
@@ -139,8 +183,8 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
             rotation = 0
             # 180도 회전 취소를 위해 translation 보정
             # 패턴 중심 기준으로 180도 역회전 필요
-            xs = [c[0] for c in original_shape]
-            ys = [c[1] for c in original_shape]
+            xs = [c[0] for c in buffered_shape]
+            ys = [c[1] for c in buffered_shape]
             cx = (min(xs) + max(xs)) / 2
             cy = (min(ys) + max(ys)) / 2
             # 원래 회전 중심에서의 오프셋 계산 후 역보정
@@ -153,8 +197,9 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         cos_r = math.cos(math.radians(rotation))
         sin_r = math.sin(math.radians(rotation))
 
+        # 버퍼 적용된 좌표 변환
         transformed_coords = []
-        for x, y in original_shape:
+        for x, y in buffered_shape:
             # 회전 (원점 기준)
             rx = x * cos_r - y * sin_r
             ry = x * sin_r + y * cos_r
@@ -164,12 +209,42 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
             # 좌표 교환: Sparrow(X=길이, Y=폭) → 시각화(X=폭, Y=길이)
             transformed_coords.append((py, px))
 
+        # 원본 좌표 변환 (버퍼 전)
+        original_transformed = []
+        for x, y in original_shape:
+            # 회전 (원점 기준)
+            rx = x * cos_r - y * sin_r
+            ry = x * sin_r + y * cos_r
+            # 이동
+            px = rx + tx
+            py = ry + ty
+            # 좌표 교환: Sparrow(X=길이, Y=폭) → 시각화(X=폭, Y=길이)
+            original_transformed.append((py, px))
+
+        # 그레인라인 좌표 변환
+        grainline_transformed = None
+        if placed.id in grainline_data:
+            gl_start, gl_end = grainline_data[placed.id]
+            transformed_gl = []
+            for x, y in [gl_start, gl_end]:
+                # 회전 (원점 기준)
+                rx = x * cos_r - y * sin_r
+                ry = x * sin_r + y * cos_r
+                # 이동
+                px = rx + tx
+                py = ry + ty
+                # 좌표 교환: Sparrow(X=길이, Y=폭) → 시각화(X=폭, Y=길이)
+                transformed_gl.append((py, px))
+            grainline_transformed = (transformed_gl[0], transformed_gl[1])
+
         placements.append({
             'pattern_id': placed.id,
             'x': ty,  # Sparrow Y → 시각화 X (폭 방향)
             'y': tx,  # Sparrow X → 시각화 Y (길이 방향)
             'rotation': rotation,
-            'coords': transformed_coords
+            'coords': transformed_coords,  # 버퍼 적용된 좌표
+            'original_coords': original_transformed,  # 원본 좌표 (버퍼 전)
+            'grainline': grainline_transformed  # 그레인라인 좌표
         })
 
     return {
@@ -182,7 +257,8 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         'used_length_yd': used_length_cm / 100 * 1.09361,
         'efficiency': round(efficiency, 1),
         'placements': placements,
-        'sparrow_mode': True
+        'sparrow_mode': True,
+        'buffer_mm': buffer_mm  # 버퍼 크기 저장
     }
 
 
@@ -245,9 +321,15 @@ def create_sparrow_visualization(result, sheet_width_cm):
         unique_patterns = list(set(p['pattern_id'].split('\n')[0] for p in result['placements']))
         pattern_color_map = {name: colors[i % len(colors)] for i, name in enumerate(unique_patterns)}
 
+    # 버퍼 사용 여부 확인
+    buffer_mm = result.get('buffer_mm', 0)
+    has_buffer = buffer_mm > 0
+
     # 패턴 그리기
     for i, p in enumerate(result['placements']):
-        coords = p['coords']
+        coords = p['coords']  # 버퍼 적용된 좌표
+        original_coords = p.get('original_coords', [])  # 원본 좌표
+
         if coords:
             # coords는 이미 배치된 좌표
             xs = [c[0] for c in coords]
@@ -270,7 +352,18 @@ def create_sparrow_visualization(result, sheet_width_cm):
                 pattern_name = p['pattern_id'].split('\n')[0]
                 color = pattern_color_map.get(pattern_name, colors[0])
 
-            ax.fill(xs, ys, alpha=0.7, facecolor=color, edgecolor='black', linewidth=0.5)
+            # 버퍼가 있으면 버퍼 영역(연한 색) + 원본 패턴(진한 색) 표시
+            if has_buffer and original_coords:
+                # 버퍼 영역 (연한 색, 점선 테두리)
+                ax.fill(xs, ys, alpha=0.3, facecolor=color, edgecolor='gray', linewidth=0.5, linestyle='--')
+
+                # 원본 패턴 (진한 색, 실선 테두리)
+                orig_xs = [c[0] for c in original_coords]
+                orig_ys = [c[1] for c in original_coords]
+                ax.fill(orig_xs, orig_ys, alpha=0.7, facecolor=color, edgecolor='black', linewidth=0.5)
+            else:
+                # 버퍼 없으면 기존대로 표시
+                ax.fill(xs, ys, alpha=0.7, facecolor=color, edgecolor='black', linewidth=0.5)
 
             # 패턴 ID 표시 (중심점 계산 - Shapely centroid 사용)
             from shapely.geometry import Polygon as ShapelyPoly
@@ -290,6 +383,20 @@ def create_sparrow_visualization(result, sheet_width_cm):
             else:
                 label = raw_id
             ax.text(cx, cy, label, ha='center', va='center', fontsize=4, fontweight='bold')
+
+            # 그레인라인 표시 (빨간 점선)
+            grainline = p.get('grainline')
+            if grainline:
+                gl_start, gl_end = grainline
+                ax.plot([gl_start[0], gl_end[0]], [gl_start[1], gl_end[1]],
+                        'r-', linewidth=0.8, linestyle='--', alpha=0.8)
+                # 화살표 머리 (끝점에)
+                dx = gl_end[0] - gl_start[0]
+                dy = gl_end[1] - gl_start[1]
+                arrow_scale = 0.15
+                ax.annotate('', xy=(gl_end[0], gl_end[1]),
+                            xytext=(gl_end[0] - dx*arrow_scale, gl_end[1] - dy*arrow_scale),
+                            arrowprops=dict(arrowstyle='->', color='red', lw=0.8))
 
     ax.set_xlim(-1, sheet_width_cm + 1)
     ax.set_ylim(-1, used_length_cm + 1)
@@ -728,19 +835,23 @@ def poly_to_base64(poly, fill_color='gray'):
     return f"data:image/png;base64,{data}"
 
 
-def get_cached_thumbnail(idx, poly, fabric_name, zoom_span):
+def get_cached_thumbnail(idx, poly, fabric_name, zoom_span, grainline_info=None):
     """
-    썸네일 캐싱 함수: (폴리곤 고유ID, 원단명) 조합으로 캐시 관리
-    원단명이 변경되면 해당 썸네일만 새로 생성
+    썸네일 캐싱 함수: (폴리곤 고유ID, 원단명, zoom_span) 조합으로 캐시 관리
+    원단명 또는 zoom_span이 변경되면 해당 썸네일만 새로 생성
     복사/정렬 후에도 폴리곤 형상으로 정확히 매칭
+    패턴 삭제 시 zoom_span 변경으로 자동 재생성
+    그레인라인이 있으면 빨간 점선으로 표시
     """
     # 캐시 초기화
     if 'thumbnail_cache' not in st.session_state:
         st.session_state.thumbnail_cache = {}
 
-    # 캐시 키: (폴리곤 면적 + 중심점 해시, 원단명) - 폴리곤 형상 기반 고유 식별
+    # 캐시 키: (폴리곤 면적 + 중심점 해시, 원단명, zoom_span, grainline 유무) - 폴리곤 형상 + 크기 기반 고유 식별
     poly_id = (round(poly.area, 2), round(poly.centroid.x, 2), round(poly.centroid.y, 2))
-    cache_key = (poly_id, fabric_name)
+    zoom_key = round(zoom_span, 1)  # zoom_span 변경 감지
+    has_grainline = grainline_info is not None
+    cache_key = (poly_id, fabric_name, zoom_key, has_grainline)
 
     # 캐시에 있으면 재사용
     if cache_key in st.session_state.thumbnail_cache:
@@ -751,6 +862,22 @@ def get_cached_thumbnail(idx, poly, fabric_name, zoom_span):
     x, y = poly.exterior.xy
     ax.plot(x, y, 'k-', lw=0.5)
     ax.fill(x, y, color=get_fabric_color_hex(fabric_name), alpha=0.6)
+
+    # 그레인라인 표시 (빨간 점선, 화살표 - 항상 아래 방향)
+    if grainline_info:
+        gl_start, gl_end = grainline_info
+        # 화살표가 위를 향하면 (end.y > start.y) 시작점과 끝점을 바꿔서 아래로 향하게 함
+        if gl_end[1] > gl_start[1]:
+            gl_start, gl_end = gl_end, gl_start
+        ax.plot([gl_start[0], gl_end[0]], [gl_start[1], gl_end[1]],
+                'r-', lw=1.5, linestyle='--', alpha=0.9)
+        # 화살표 머리 (끝점에 - 항상 아래 방향)
+        dx = gl_end[0] - gl_start[0]
+        dy = gl_end[1] - gl_start[1]
+        ax.annotate('', xy=(gl_end[0], gl_end[1]),
+                    xytext=(gl_end[0] - dx*0.15, gl_end[1] - dy*0.15),
+                    arrowprops=dict(arrowstyle='->', color='red', lw=1.5))
+
     ax.set_xlim(poly.centroid.x - zoom_span/2, poly.centroid.x + zoom_span/2)
     ax.set_ylim(poly.centroid.y - zoom_span/2, poly.centroid.y + zoom_span/2)
     ax.set_aspect('equal')
@@ -1028,9 +1155,10 @@ def extract_style_no(file_path):
                 for be in block:
                     if be.dxftype() == 'TEXT':
                         text = be.dxf.text
-                        # 스타일번호: S/#..., M/#... 형식
-                        if text.startswith('ANNOTATION:') and '/#' in text:
-                            val = text.replace('ANNOTATION:', '').strip()
+                        text_upper = text.upper()
+                        # 스타일번호: S/#..., M/#... 형식 (대소문자 무시)
+                        if text_upper.startswith('ANNOTATION:') and '/#' in text:
+                            val = text.split(':', 1)[1].strip()
                             # S/#5535-731 → 5535-731
                             if '/#' in val:
                                 return val.split('/#')[1]
@@ -1038,6 +1166,244 @@ def extract_style_no(file_path):
     except:
         pass
     return ""
+
+
+def detect_grainline(block, return_coords=False):
+    """
+    블록 내에서 그레인라인(결방향)을 감지합니다.
+
+    그레인라인 감지 방법:
+    1. 레이어명에 'GRAIN', 'GL', '결', '7' 등 포함된 엔티티
+    2. 그레인라인 레이어가 없으면 블록 내 독립 LINE 중 가장 긴 것 (100단위 이상)
+
+    Args:
+        block: ezdxf 블록 객체
+        return_coords: True면 (angle, start, end) 반환, False면 angle만 반환
+
+    Returns:
+        return_coords=False: angle (그레인라인 각도) 또는 None
+        return_coords=True: (angle, start, end) 또는 (None, None, None)
+    """
+    import math
+
+    # 그레인라인 레이어 키워드 (숫자 7도 포함 - 일부 CAD 시스템에서 사용)
+    grainline_keywords = ['GRAIN', 'GL', 'GRAINLINE', '결', '결방향', 'STRAIGHT']
+    grainline_layer_numbers = ['7']  # 숫자 레이어도 그레인라인일 수 있음
+    candidate_lines = []
+
+    for entity in block:
+        layer_name = str(entity.dxf.layer).upper() if hasattr(entity.dxf, 'layer') else ''
+
+        # 레이어명으로 그레인라인 감지 (키워드 또는 숫자 레이어)
+        is_grainline_layer = (
+            any(kw in layer_name for kw in grainline_keywords) or
+            layer_name in grainline_layer_numbers
+        )
+
+        if entity.dxftype() == 'LINE':
+            start = entity.dxf.start
+            end = entity.dxf.end
+            dx = end.x - start.x
+            dy = end.y - start.y
+            length = math.sqrt(dx*dx + dy*dy)
+
+            if length > 1:  # 최소 길이 필터
+                # 각도 계산 (수평 기준, -180 ~ 180)
+                angle = math.degrees(math.atan2(dy, dx))
+                candidate_lines.append({
+                    'angle': angle,
+                    'length': length,
+                    'is_grainline_layer': is_grainline_layer,
+                    'start': (start.x, start.y),
+                    'end': (end.x, end.y)
+                })
+
+        elif entity.dxftype() == 'LWPOLYLINE' and not entity.closed:
+            # 열린 폴리라인도 그레인라인일 수 있음
+            pts = list(entity.get_points())
+            if len(pts) == 2:  # 2점 직선
+                start, end = pts[0], pts[1]
+                dx = end[0] - start[0]
+                dy = end[1] - start[1]
+                length = math.sqrt(dx*dx + dy*dy)
+                if length > 1:
+                    angle = math.degrees(math.atan2(dy, dx))
+                    candidate_lines.append({
+                        'angle': angle,
+                        'length': length,
+                        'is_grainline_layer': is_grainline_layer,
+                        'start': (start[0], start[1]),
+                        'end': (end[0], end[1])
+                    })
+
+    if not candidate_lines:
+        return (None, None, None) if return_coords else None
+
+    # 그레인라인 우선순위:
+    # 1. 그레인라인 레이어에 있는 선
+    # 2. 그 중 가장 긴 선
+    grainline_layer_lines = [l for l in candidate_lines if l['is_grainline_layer']]
+
+    best = None
+    if grainline_layer_lines:
+        # 그레인라인 레이어에서 가장 긴 선
+        best = max(grainline_layer_lines, key=lambda x: x['length'])
+    else:
+        # 그레인라인 레이어가 없으면 독립 LINE 중 가장 긴 것 사용 (100단위 이상)
+        long_lines = [l for l in candidate_lines if l['length'] >= 100]
+        if long_lines:
+            best = max(long_lines, key=lambda x: x['length'])
+
+    if best:
+        if return_coords:
+            return best['angle'], best['start'], best['end']
+        return best['angle']
+
+    return (None, None, None) if return_coords else None
+
+
+def rotate_polygon_to_vertical_grain(poly, grainline_angle):
+    """
+    폴리곤을 그레인라인이 수직(90도)이 되도록 회전합니다.
+
+    Args:
+        poly: Shapely Polygon
+        grainline_angle: 현재 그레인라인 각도 (도)
+
+    Returns:
+        회전된 Shapely Polygon
+    """
+    from shapely import affinity
+
+    # 수직(90도)으로 맞추기 위해 필요한 회전 각도
+    # grainline_angle이 0도면 90도 회전 필요
+    # grainline_angle이 45도면 45도 회전 필요
+    # grainline_angle이 90도면 0도 회전 (이미 수직)
+
+    # 각도 정규화 (-90 ~ 90 범위로)
+    normalized = grainline_angle % 180
+    if normalized > 90:
+        normalized -= 180
+
+    # 수직(90도)까지 회전 필요 각도
+    rotation_needed = 90 - normalized
+
+    # 180도 이상 회전 방지
+    if rotation_needed > 90:
+        rotation_needed -= 180
+    elif rotation_needed < -90:
+        rotation_needed += 180
+
+    if abs(rotation_needed) < 1:  # 이미 수직에 가까움
+        return poly, 0
+
+    # 중심점 기준 회전
+    rotated = affinity.rotate(poly, rotation_needed, origin='centroid')
+    return rotated, rotation_needed
+
+
+def rotate_grainline_coords(start, end, rotation_angle, origin):
+    """
+    그레인라인 좌표를 회전시킵니다.
+
+    Args:
+        start: (x, y) 시작점
+        end: (x, y) 끝점
+        rotation_angle: 회전 각도 (도)
+        origin: (x, y) 회전 중심점
+
+    Returns:
+        (new_start, new_end) 회전된 좌표
+    """
+    import math
+
+    if abs(rotation_angle) < 1:
+        return start, end
+
+    rad = math.radians(rotation_angle)
+    cos_a = math.cos(rad)
+    sin_a = math.sin(rad)
+    ox, oy = origin
+
+    def rotate_point(px, py):
+        dx = px - ox
+        dy = py - oy
+        new_x = ox + dx * cos_a - dy * sin_a
+        new_y = oy + dx * sin_a + dy * cos_a
+        return (new_x, new_y)
+
+    new_start = rotate_point(start[0], start[1])
+    new_end = rotate_point(end[0], end[1])
+    return new_start, new_end
+
+
+def detect_grainline_for_polygon(msp, poly):
+    """
+    모델스페이스에서 특정 폴리곤 내부 또는 근처에 있는 그레인라인을 감지합니다.
+    레거시 DXF 파일용 (블록 없이 모델스페이스에 직접 그려진 패턴)
+
+    Args:
+        msp: ezdxf 모델스페이스
+        poly: Shapely Polygon (대상 패턴)
+
+    Returns:
+        angle: 그레인라인의 각도 (도)
+        None: 그레인라인을 찾지 못한 경우
+    """
+    import math
+    from shapely.geometry import Point, LineString
+
+    grainline_keywords = ['GRAIN', 'GL', 'GRAINLINE', '결', '결방향', 'STRAIGHT']
+    candidate_lines = []
+
+    # 폴리곤 바운딩박스 확장 (근처 선 검색용)
+    bounds = poly.bounds
+    margin = 50  # 50단위 여유
+    search_bounds = (bounds[0] - margin, bounds[1] - margin,
+                     bounds[2] + margin, bounds[3] + margin)
+
+    for entity in msp:
+        layer_name = entity.dxf.layer.upper() if hasattr(entity.dxf, 'layer') else ''
+        is_grainline_layer = any(kw in layer_name for kw in grainline_keywords)
+
+        if entity.dxftype() == 'LINE':
+            start = entity.dxf.start
+            end = entity.dxf.end
+
+            # 바운딩박스 내에 있는지 확인
+            mid_x = (start.x + end.x) / 2
+            mid_y = (start.y + end.y) / 2
+            if not (search_bounds[0] <= mid_x <= search_bounds[2] and
+                    search_bounds[1] <= mid_y <= search_bounds[3]):
+                continue
+
+            # 폴리곤 내부 또는 근처에 있는지 확인
+            mid_point = Point(mid_x, mid_y)
+            if not (poly.contains(mid_point) or poly.distance(mid_point) < margin):
+                continue
+
+            dx = end.x - start.x
+            dy = end.y - start.y
+            length = math.sqrt(dx*dx + dy*dy)
+
+            if length > 1:
+                angle = math.degrees(math.atan2(dy, dx))
+                candidate_lines.append({
+                    'angle': angle,
+                    'length': length,
+                    'is_grainline_layer': is_grainline_layer
+                })
+
+    if not candidate_lines:
+        return None
+
+    # 그레인라인 레이어에 있는 선 우선
+    grainline_layer_lines = [l for l in candidate_lines if l['is_grainline_layer']]
+    if grainline_layer_lines:
+        best = max(grainline_layer_lines, key=lambda x: x['length'])
+        return best['angle']
+
+    return None
 
 
 def preprocess_dxf_content(file_path):
@@ -1078,11 +1444,81 @@ def preprocess_dxf_content(file_path):
     return temp_filename
 
 
+def scan_dxf_sizes(file_path):
+    """
+    DXF 파일에서 사이즈 목록만 빠르게 스캔합니다.
+    전체 파싱 없이 사이즈 정보만 추출하여 선택 UI에 사용합니다.
+
+    Returns:
+        list: 고유한 사이즈 목록 (정렬됨)
+    """
+    import re
+
+    sizes = set()
+
+    try:
+        # 특수문자 전처리
+        processed_path = preprocess_dxf_content(file_path)
+
+        # 한글 인코딩(CP949) 우선 시도
+        try:
+            doc = ezdxf.readfile(processed_path, encoding='cp949')
+        except:
+            doc = ezdxf.readfile(processed_path)
+
+        msp = doc.modelspace()
+
+        # 방법 1: INSERT 블록에서 사이즈 추출
+        for entity in msp:
+            if entity.dxftype() == 'INSERT':
+                block_name = entity.dxf.name
+
+                # 블록명에서 사이즈 추출 (예: BLK_1_XS, 앞판_M)
+                if '_' in block_name:
+                    _, potential_size = block_name.rsplit('_', 1)
+                    if re.match(r'^([0-9]*X{1,3}L?|[SML]|XS|\d{2,3})$', potential_size, re.IGNORECASE):
+                        sizes.add(potential_size.upper())
+
+                # 블록 내 TEXT에서 SIZE: 필드 추출
+                try:
+                    block = doc.blocks.get(block_name)
+                    for be in block:
+                        if be.dxftype() == 'TEXT':
+                            text = be.dxf.text
+                            text_upper = text.upper()
+                            if text_upper.startswith('SIZE:'):
+                                size_val = text.split(':', 1)[1].strip()
+                                if size_val:
+                                    sizes.add(size_val.upper())
+                except:
+                    pass
+    except Exception as e:
+        st.error(f"사이즈 스캔 오류: {e}")
+        return []
+
+    # 사이즈 정렬 (숫자 사이즈 우선, 문자 사이즈 후순)
+    def size_sort_key(s):
+        # 숫자 사이즈 (85, 90, 95, 100, 105, 110, 115, 120...)
+        if s.isdigit():
+            return (0, int(s))
+        # 문자 사이즈 순서 정의
+        size_order = ['XS', 'S', 'M', 'L', 'XL', 'XXL', '2XL', '3XL', '0X', '1X', '2X', '3X']
+        if s in size_order:
+            return (1, size_order.index(s))
+        return (2, s)
+
+    return sorted(list(sizes), key=size_sort_key)
+
+
 @st.cache_data
-def process_dxf(file_path):
+def process_dxf(file_path, selected_sizes=None):
     """
     DXF 파일을 읽어 (Polygon, 패턴이름, 원단명, 사이즈) 튜플 리스트를 반환합니다.
     블록(INSERT) 기반으로 처리하여 패턴 누락을 방지합니다.
+
+    Args:
+        file_path: DXF 파일 경로
+        selected_sizes: 선택된 사이즈 목록 (None이면 전체 로딩)
     """
     import re
 
@@ -1191,27 +1627,28 @@ def process_dxf(file_path):
                         elif be.dxftype() == 'TEXT':
                             text = be.dxf.text
 
-                            # PIECE NAME 필드에서 패턴 번호/이름 추출
-                            if text.startswith('PIECE NAME:'):
-                                piece_val = text.replace('PIECE NAME:', '').strip()
+                            # PIECE NAME 필드에서 패턴 번호/이름 추출 (대소문자 무시)
+                            text_upper = text.upper()
+                            if text_upper.startswith('PIECE NAME:'):
+                                piece_val = text.split(':', 1)[1].strip()
                                 if piece_val:
                                     piece_name = piece_val
 
-                            # QUANTITY 필드에서 원본 수량 추출
-                            elif text.startswith('QUANTITY:') or text.startswith('QTY:'):
+                            # QUANTITY 필드에서 원본 수량 추출 (대소문자 무시)
+                            elif text_upper.startswith('QUANTITY:') or text_upper.startswith('QTY:'):
                                 qty_val = text.split(':', 1)[1].strip()
                                 if qty_val and qty_val.isdigit():
                                     dxf_quantity = int(qty_val)
 
-                            # SIZE 필드에서 사이즈 추출
-                            elif text.startswith('SIZE:'):
-                                size_val = text.replace('SIZE:', '').strip()
+                            # SIZE 필드에서 사이즈 추출 (대소문자 무시)
+                            elif text_upper.startswith('SIZE:'):
+                                size_val = text.split(':', 1)[1].strip()
                                 if size_val:
                                     size_name = size_val
 
-                            # CATEGORY 필드에서 원단명 추출
-                            elif text.startswith('CATEGORY:'):
-                                cat_val = text.replace('CATEGORY:', '').strip()
+                            # CATEGORY 필드에서 원단명 추출 (대소문자 무시)
+                            elif text_upper.startswith('CATEGORY:'):
+                                cat_val = text.split(':', 1)[1].strip()
                                 if cat_val:
                                     # 매핑된 원단명 찾기
                                     for key, mapped in fabric_map.items():
@@ -1222,9 +1659,9 @@ def process_dxf(file_path):
                                     if not fabric_name and cat_val:
                                         fabric_name = cat_val
 
-                            # ANNOTATION 필드 처리
-                            elif text.startswith('ANNOTATION:'):
-                                val = text.replace('ANNOTATION:', '').strip()
+                            # ANNOTATION 필드 처리 (대소문자 무시)
+                            elif text_upper.startswith('ANNOTATION:'):
+                                val = text.split(':', 1)[1].strip()
                                 if not val:
                                     continue
 
@@ -1280,10 +1717,34 @@ def process_dxf(file_path):
                     if not pattern_name and piece_name:
                         pattern_name = piece_name
 
+                    # pattern_group이 숫자만으로 구성된 경우 piece_name을 그룹으로 사용
+                    # 예: 블록명 "1", "2", "3"... 인 경우 piece_name "BK1", "FRT2"를 그룹으로 사용
+                    if piece_name and (not pattern_group or pattern_group.isdigit()):
+                        pattern_group = piece_name
+
                     # 10cm² 이상인 패턴만 추가 (작은 부속 패턴 포함)
                     if max_poly and (max_area / 100) >= 10:
-                        # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity)
-                        final.append((max_poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity))
+                        # 선택된 사이즈 필터링 (selected_sizes가 지정된 경우)
+                        if selected_sizes is not None:
+                            # 사이즈명을 대문자로 비교
+                            size_upper = size_name.upper() if size_name else ""
+                            selected_upper = [s.upper() for s in selected_sizes]
+                            if size_upper not in selected_upper:
+                                continue  # 선택되지 않은 사이즈는 건너뛰기
+
+                        # 그레인라인 감지 및 패턴 회전 (수직 정렬)
+                        grainline_info = None  # (start, end) 좌표
+                        grainline_angle, gl_start, gl_end = detect_grainline(block, return_coords=True)
+                        if grainline_angle is not None and gl_start and gl_end:
+                            # 패턴 회전
+                            centroid = (max_poly.centroid.x, max_poly.centroid.y)
+                            max_poly, rotation_applied = rotate_polygon_to_vertical_grain(max_poly, grainline_angle)
+                            # 그레인라인 좌표도 함께 회전
+                            gl_start, gl_end = rotate_grainline_coords(gl_start, gl_end, rotation_applied, centroid)
+                            grainline_info = (gl_start, gl_end)
+
+                        # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity, grainline_info)
+                        final.append((max_poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity, grainline_info))
                 except:
                     pass
 
@@ -1329,8 +1790,15 @@ def process_dxf(file_path):
             added_polys = []
             for idx, p in enumerate(candidates):
                 if not any(p.centroid.distance(e.centroid) < 50 for e in added_polys):
+                    # 그레인라인 감지 및 패턴 회전 (수직 정렬) - 레거시 방식
+                    grainline_angle = detect_grainline_for_polygon(msp, p)
+                    grainline_info = None
+                    if grainline_angle is not None:
+                        centroid = (p.centroid.x, p.centroid.y)
+                        p, _ = rotate_polygon_to_vertical_grain(p, grainline_angle)
                     added_polys.append(p)
-                    final.append((p, "", "겉감", "", str(idx + 1), "", 0))  # 원단명 기본값: 겉감, 그룹: 순번, piece_name: "", dxf_qty: 0
+                    # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_qty, grainline_info)
+                    final.append((p, "", "겉감", "", str(idx + 1), "", 0, grainline_info))
 
         # 면적 기준 정렬 (큰 것부터)
         final.sort(key=lambda x: x[0].area, reverse=True)
@@ -1475,6 +1943,9 @@ def show_detail_viewer(idx, pattern, fabric_name):
 if "df" not in st.session_state: st.session_state.df = None
 if "patterns" not in st.session_state: st.session_state.patterns = None
 if "loaded_file" not in st.session_state: st.session_state.loaded_file = None
+if "dxf_sizes" not in st.session_state: st.session_state.dxf_sizes = None  # 스캔된 사이즈 목록
+if "size_selection_done" not in st.session_state: st.session_state.size_selection_done = False  # 사이즈 선택 완료 여부
+if "selected_load_sizes" not in st.session_state: st.session_state.selected_load_sizes = None  # 로딩할 사이즈 목록
 
 # A. 파일 업로드 섹션
 uploaded_file = st.file_uploader(
@@ -1490,20 +1961,86 @@ if uploaded_file is not None:
         st.session_state.patterns = None
         st.session_state.df = None
         st.session_state.loaded_file = file_key
+        st.session_state.dxf_sizes = None  # 사이즈 목록 초기화
+        st.session_state.size_selection_done = False  # 사이즈 선택 상태 초기화
+        st.session_state.selected_load_sizes = None  # 선택 사이즈 초기화
         # 체크박스 상태도 초기화
         for key in list(st.session_state.keys()):
-            if key.startswith("chk_"):
+            if key.startswith("chk_") or key.startswith("size_chk_"):
                 del st.session_state[key]
 
-    # 최초 로드시 패턴 분석 실행
-    if st.session_state.patterns is None:
+    # 임시 파일 생성 (사이즈 스캔 및 패턴 로딩에 공용 사용)
+    tmp_path = None
+    if st.session_state.dxf_sizes is None or st.session_state.patterns is None:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp_file:
             tmp_file.write(uploaded_file.getvalue())
             tmp_path = tmp_file.name
-        
-        patterns, detected_base_size = process_dxf(tmp_path)
-        style_no = extract_style_no(tmp_path)
-        os.remove(tmp_path) # 임시 파일 삭제
+
+    # 1단계: 사이즈 스캔 (파일 업로드 직후)
+    if st.session_state.dxf_sizes is None and tmp_path:
+        with st.spinner("사이즈 목록 스캔 중..."):
+            scanned_sizes = scan_dxf_sizes(tmp_path)
+            st.session_state.dxf_sizes = scanned_sizes
+            # 사이즈가 1개 이하면 바로 선택 완료 처리 (선택 UI 불필요)
+            if len(scanned_sizes) <= 1:
+                st.session_state.size_selection_done = True
+                st.session_state.selected_load_sizes = scanned_sizes if scanned_sizes else None
+
+    # 2단계: 사이즈 선택 UI (여러 사이즈가 있을 때)
+    if st.session_state.dxf_sizes and len(st.session_state.dxf_sizes) > 1 and not st.session_state.size_selection_done:
+        st.info(f"📏 **{len(st.session_state.dxf_sizes)}개 사이즈 발견** - 불러올 사이즈를 선택하세요")
+
+        # 전체 선택/해제 버튼
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            if st.button("✅ 전체 선택", use_container_width=True):
+                for size in st.session_state.dxf_sizes:
+                    st.session_state[f"size_chk_{size}"] = True
+                st.rerun()
+        with col2:
+            if st.button("⬜ 전체 해제", use_container_width=True):
+                for size in st.session_state.dxf_sizes:
+                    st.session_state[f"size_chk_{size}"] = False
+                st.rerun()
+
+        # 사이즈 체크박스 (가로 배열)
+        cols = st.columns(min(6, len(st.session_state.dxf_sizes)))
+        for i, size in enumerate(st.session_state.dxf_sizes):
+            col_idx = i % len(cols)
+            with cols[col_idx]:
+                # 기본값: 전체 선택
+                default_val = st.session_state.get(f"size_chk_{size}", True)
+                st.checkbox(size, value=default_val, key=f"size_chk_{size}")
+
+        # 선택 완료 버튼
+        selected_count = sum(1 for size in st.session_state.dxf_sizes if st.session_state.get(f"size_chk_{size}", True))
+        st.write(f"선택된 사이즈: **{selected_count}개** / 전체 {len(st.session_state.dxf_sizes)}개")
+
+        if st.button(f"🚀 선택한 {selected_count}개 사이즈 불러오기", type="primary", use_container_width=True, disabled=(selected_count == 0)):
+            # 선택된 사이즈 목록 저장
+            selected = [size for size in st.session_state.dxf_sizes if st.session_state.get(f"size_chk_{size}", True)]
+            st.session_state.selected_load_sizes = selected if selected else None
+            st.session_state.size_selection_done = True
+            st.rerun()
+
+        # 임시 파일 삭제 (사이즈 선택 전에는 패턴 로딩 안 함)
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        st.stop()  # 사이즈 선택 완료 전까지 아래 코드 실행 안 함
+
+    # 3단계: 선택된 사이즈만 패턴 로딩
+    if st.session_state.patterns is None and st.session_state.size_selection_done:
+        if tmp_path is None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".dxf") as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                tmp_path = tmp_file.name
+
+        with st.spinner("패턴 로딩 중..."):
+            # 캐시 키용으로 리스트를 튜플로 변환
+            sizes_tuple = tuple(st.session_state.selected_load_sizes) if st.session_state.selected_load_sizes else None
+            patterns, detected_base_size = process_dxf(tmp_path, sizes_tuple)
+            style_no = extract_style_no(tmp_path)
+        os.remove(tmp_path)  # 임시 파일 삭제
         st.session_state.patterns = patterns
         st.session_state.detected_base_size = detected_base_size  # DXF에서 추출한 기준사이즈
         st.session_state.style_no = style_no
@@ -1584,7 +2121,7 @@ if uploaded_file is not None:
 
                     for size in all_sizes:
                         if size not in size_dict:
-                            # 누락된 사이즈 - 기준사이즈 패턴 복사 (7개 요소)
+                            # 누락된 사이즈 - 기준사이즈 패턴 복사 (8개 요소)
                             new_pattern = (
                                 base_pattern[0],  # poly (기준사이즈 형상 사용)
                                 base_pattern[1],  # pattern_name
@@ -1592,7 +2129,8 @@ if uploaded_file is not None:
                                 size,             # 새 사이즈
                                 pattern_group,    # pattern_group
                                 base_pattern[5] if len(base_pattern) > 5 else "",  # piece_name
-                                base_pattern[6] if len(base_pattern) > 6 else 0    # dxf_quantity
+                                base_pattern[6] if len(base_pattern) > 6 else 0,   # dxf_quantity
+                                base_pattern[7] if len(base_pattern) > 7 else None # grainline_info
                             )
                             added_patterns.append(new_pattern)
                             missing_info.append(f"{pattern_group}_{size}")
@@ -1730,13 +2268,14 @@ if uploaded_file is not None:
     df = st.session_state.df
 
     if patterns:
-        # 썸네일 비율 고정용 Max값 계산
+        # 썸네일 비율 고정용 Max값 계산 (현재 남아있는 패턴 기준)
+        # 패턴 삭제 시 가장 큰 패턴 기준으로 자동 재설정됨
         max_dim = 0
-        for p_data in patterns:  # (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity)
+        for p_data in patterns:
             p = p_data[0]
             minx, miny, maxx, maxy = p.bounds
             max_dim = max(max_dim, maxx - minx, maxy - miny)
-        zoom_span = max_dim * 1.1
+        zoom_span = max_dim * 1.1 if max_dim > 0 else 100  # 기본값 설정
 
         # ----------------------------------------------------------------
         # A. 사이즈 선택 UI (그레이딩된 DXF용)
@@ -1785,10 +2324,26 @@ if uploaded_file is not None:
 
             # 중첩 시각화
             with st.expander("🔍 사이즈 중첩 비교", expanded=True):
-                # 패턴 그룹별로 분류 (데이터프레임 번호 기준) - 복사 패턴 제외
+                # 패턴 그룹별로 분류 (상세 리스트 번호 기준) - 복사 패턴 제외
                 from collections import defaultdict
                 original_count = st.session_state.get('original_pattern_count', len(patterns))
                 pattern_groups = defaultdict(list)
+
+                # 기준 사이즈 패턴의 순차 번호 매핑 (pattern_group -> list_idx)
+                base_size = st.session_state.get('base_size')
+                group_to_list_idx = {}
+                list_idx = 0
+                for idx, p_data in enumerate(patterns):
+                    if idx >= original_count:
+                        continue
+                    size_name = p_data[3]
+                    pattern_group = p_data[4]
+                    # 기준 사이즈이거나 사이즈 없는 패턴만 번호 부여
+                    if not all_sizes or size_name == base_size or not size_name:
+                        list_idx += 1
+                        if pattern_group:
+                            group_to_list_idx[pattern_group] = list_idx
+
                 for idx, p_data in enumerate(patterns):
                     # 복사된 패턴은 제외 (원본 패턴 수 이후 인덱스)
                     if idx >= original_count:
@@ -1799,9 +2354,11 @@ if uploaded_file is not None:
                     pattern_group = p_data[4]
                     pattern_name = p_data[1]
                     if size_name:  # 사이즈가 있는 패턴만
-                        # pattern_group (DXF 블록명에서 추출된 번호)을 사용하여 그룹화
-                        if pattern_group:
-                            group_key = f"패턴 {pattern_group}"
+                        # 상세 리스트의 순차 번호 사용 (일괄 수정 도구와 동일)
+                        if pattern_group and pattern_group in group_to_list_idx:
+                            group_key = f"{group_to_list_idx[pattern_group]}"
+                        elif pattern_group:
+                            group_key = f"{pattern_group}"
                         elif pattern_name:
                             group_key = pattern_name
                         else:
@@ -1823,9 +2380,13 @@ if uploaded_file is not None:
                     num_groups = len(pattern_groups)
                     num_cols = min(num_groups, 6)
 
-                    # 그룹을 숫자 기준으로 정렬 (패턴 1, 패턴 2, ... 순서로)
+                    # 그룹을 숫자 기준으로 정렬 (1, 2, 3... 순서로)
                     def sort_key(item):
                         name = item[0]
+                        # 숫자로만 구성된 경우 숫자 정렬
+                        if name.isdigit():
+                            return (0, int(name))
+                        # "패턴 N" 형식 (fallback)
                         if name.startswith("패턴 "):
                             try:
                                 return (0, int(name.replace("패턴 ", "")))
@@ -1842,7 +2403,7 @@ if uploaded_file is not None:
 
                         for col_idx, (group_name, group_patterns) in enumerate(row_groups):
                             with overlay_cols[col_idx]:
-                                st.caption(f"**{group_name}** ({len(group_patterns)}개)")
+                                st.caption(f"**{group_name}번** ({len(group_patterns)}개)")
                                 fig = create_overlay_visualization(
                                     group_patterns,
                                     st.session_state.selected_sizes,
@@ -2029,18 +2590,19 @@ if uploaded_file is not None:
         # 기본 사이즈만 필터링 (썸네일용)
         filtered_patterns = []
         for orig_idx, p_data in enumerate(patterns):
-            # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, ...)
+            # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_qty, grainline_info)
             poly = p_data[0]
             pattern_name = p_data[1]
             fabric_name = p_data[2]
             size_name = p_data[3]
             pattern_group = p_data[4]
+            grainline_info = p_data[7] if len(p_data) > 7 else None
             if not all_sizes:  # 사이즈 없는 DXF
-                filtered_patterns.append((orig_idx, poly, pattern_name, fabric_name, size_name, pattern_group))
+                filtered_patterns.append((orig_idx, poly, pattern_name, fabric_name, size_name, pattern_group, grainline_info))
             elif size_name == base_size:  # 기본 사이즈만
-                filtered_patterns.append((orig_idx, poly, pattern_name, fabric_name, size_name, pattern_group))
+                filtered_patterns.append((orig_idx, poly, pattern_name, fabric_name, size_name, pattern_group, grainline_info))
             elif not size_name:  # 사이즈 없는 패턴
-                filtered_patterns.append((orig_idx, poly, pattern_name, fabric_name, size_name, pattern_group))
+                filtered_patterns.append((orig_idx, poly, pattern_name, fabric_name, size_name, pattern_group, grainline_info))
 
         cols_per_row = 20
         rows = math.ceil(len(filtered_patterns) / cols_per_row)
@@ -2050,15 +2612,15 @@ if uploaded_file is not None:
             for col_idx in range(cols_per_row):
                 list_idx = row * cols_per_row + col_idx
                 if list_idx < len(filtered_patterns):
-                    orig_idx, p, pattern_name, _, size_name, _ = filtered_patterns[list_idx]
+                    orig_idx, p, pattern_name, _, size_name, pattern_group, grainline_info = filtered_patterns[list_idx]
                     # 원단명은 df에서 가져오기 (일괄수정 반영)
                     current_fabric = st.session_state.df.at[orig_idx, "원단"] if orig_idx < len(st.session_state.df) else "겉감"
                     with cols[col_idx]:
-                        # 캐싱된 썸네일 사용 (깜빡임 방지)
-                        thumbnail_data = get_cached_thumbnail(orig_idx, p, current_fabric, zoom_span)
+                        # 캐싱된 썸네일 사용 (깜빡임 방지, 그레인라인 표시)
+                        thumbnail_data = get_cached_thumbnail(orig_idx, p, current_fabric, zoom_span, grainline_info)
                         st.image(thumbnail_data, use_container_width=True)
 
-                        # 팝업 호출 버튼 (순차 번호 표시)
+                        # 팝업 호출 버튼 (순차 번호 - 상세 리스트와 동일)
                         btn_label = f"{list_idx + 1}"
                         if st.button(btn_label, key=f"btn_zoom_{orig_idx}", width='stretch'):
                             show_detail_viewer(orig_idx, p, current_fabric)
@@ -2469,13 +3031,16 @@ if uploaded_file is not None:
         # 2컬럼 레이아웃: 왼쪽(공통설정) | 오른쪽(180도회전 + 원단별설정)
         left_col, right_col = st.columns(2)
 
+        # 원단별 패턴 버퍼 저장용 딕셔너리
+        fabric_buffers = {}
+
         with left_col:
-            # 공통 설정
-            nest_spacing = st.number_input(
-                "패턴 간격 (mm)",
+            # 공통 설정 (기본 패턴 버퍼 - 원단별 미설정 시 사용)
+            nest_buffer = st.number_input(
+                "기본 패턴 버퍼 (mm)",
                 min_value=0, max_value=50, value=0,
-                help="패턴 사이의 간격",
-                key="nest_spacing"
+                help="패턴 둘레로 확장되는 여유 공간 (블로킹)",
+                key="nest_buffer"
             )
 
             # 180도 회전 허용
@@ -2515,12 +3080,14 @@ if uploaded_file is not None:
         with right_col:
 
             # 원단별 설정 헤더
-            hcol1, hcol2, hcol3 = st.columns([2, 1, 1])
+            hcol1, hcol2, hcol3, hcol4 = st.columns([2, 1, 1, 1])
             with hcol1:
                 st.markdown("**원단**")
             with hcol2:
                 st.markdown("**효율%**")
             with hcol3:
+                st.markdown("**버퍼mm**")
+            with hcol4:
                 st.markdown("**벌수**")
 
             # 원단별 설정 입력
@@ -2535,7 +3102,7 @@ if uploaded_file is not None:
                     width_cm = width_val
                 fabric_widths[fabric] = width_cm
 
-                col1, col2, col3 = st.columns([2, 1, 1])
+                col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
                 with col1:
                     st.text(f"{fabric}: {width_cm:.1f}cm")
                 with col2:
@@ -2546,6 +3113,15 @@ if uploaded_file is not None:
                         label_visibility="collapsed"
                     )
                 with col3:
+                    # 원단별 패턴 버퍼 (기본값: 공통 설정값 사용)
+                    fabric_buffers[fabric] = st.number_input(
+                        "버퍼",
+                        min_value=0, max_value=50, value=nest_buffer,
+                        key=f"fabric_buffer_{i}",
+                        label_visibility="collapsed",
+                        help=f"{fabric} 원단의 패턴 버퍼 (둘레 확장)"
+                    )
+                with col4:
                     marker_quantities[fabric] = st.number_input(
                         "벌수",
                         min_value=1, max_value=10, value=1,
@@ -2608,8 +3184,15 @@ if uploaded_file is not None:
                                 row = st.session_state.df.loc[idx]
                                 poly = patterns[idx][0]
                                 size_name = patterns[idx][3]  # 사이즈 정보
+                                grainline_info = patterns[idx][7] if len(patterns[idx]) > 7 else None  # 그레인라인 정보
                                 coords = list(poly.exterior.coords)[:-1]
                                 coords_cm = [(p[0] / 10, p[1] / 10) for p in coords]
+
+                                # 그레인라인 좌표도 cm로 변환
+                                grainline_cm = None
+                                if grainline_info:
+                                    gl_start, gl_end = grainline_info
+                                    grainline_cm = ((gl_start[0]/10, gl_start[1]/10), (gl_end[0]/10, gl_end[1]/10))
 
                                 # 사이즈별 벌수 적용 (사이즈 2개 이상일 때)
                                 if has_multiple_sizes and size_name:
@@ -2631,7 +3214,8 @@ if uploaded_file is not None:
                                     'quantity': quantity,
                                     'pattern_id': pattern_id,
                                     'area_cm2': poly.area / 100,
-                                    'df_idx': idx  # 원본 df 인덱스 저장
+                                    'df_idx': idx,  # 원본 df 인덱스 저장
+                                    'grainline_cm': grainline_cm  # 그레인라인 좌표 (cm)
                                 })
 
                         # 디버그: 상세 리스트 수량 합계 계산
@@ -2650,18 +3234,20 @@ if uploaded_file is not None:
                             st.warning(f"⚠️ 수량 불일치: 예상 {expected_qty}개, 실제 {total_qty_debug}개")
 
                         width_cm = fabric_widths[fabric]
+                        # 원단별 패턴 버퍼 (미설정 시 기본값 사용)
+                        fabric_buffer = fabric_buffers.get(fabric, nest_buffer)
 
                         if use_sparrow and SPARROW_AVAILABLE:
-                            # Sparrow 네스팅
+                            # Sparrow 네스팅 (버퍼로 패턴 둘레 확장)
                             result = run_sparrow_nesting(
-                                pattern_data, width_cm, sparrow_time, nest_rotation, nest_spacing, nest_mirror
+                                pattern_data, width_cm, sparrow_time, nest_rotation, 0, nest_mirror, fabric_buffer
                             )
                         else:
-                            # 기본 네스팅 엔진
+                            # 기본 네스팅 엔진 (버퍼 미지원, spacing으로 대체)
                             fabric_target_eff = target_efficiencies.get(fabric, 80)
                             engine = NestingEngine(
                                 sheet_width=width_cm * 10,
-                                spacing=nest_spacing,
+                                spacing=fabric_buffer,  # 기본 엔진은 spacing으로 대체
                                 target_efficiency=fabric_target_eff
                             )
                             for p in pattern_data:
@@ -2678,6 +3264,7 @@ if uploaded_file is not None:
                         result['marker_quantity'] = fabric_marker_qty
                         result['size_quantities'] = size_quantities if has_multiple_sizes else {}
                         result['has_multiple_sizes'] = has_multiple_sizes
+                        result['buffer'] = fabric_buffer  # 원단별 패턴 버퍼 저장
                         nesting_results[fabric] = result
 
                         # 디버그: 배치 실패 패턴 확인
@@ -2819,8 +3406,15 @@ if uploaded_file is not None:
                                                             row = st.session_state.df.loc[idx]
                                                             poly = patterns[idx][0]
                                                             size_name = patterns[idx][3]
+                                                            grainline_info = patterns[idx][7] if len(patterns[idx]) > 7 else None
                                                             coords = list(poly.exterior.coords)[:-1]
                                                             coords_cm = [(p[0] / 10, p[1] / 10) for p in coords]
+
+                                                            # 그레인라인 좌표도 cm로 변환
+                                                            grainline_cm = None
+                                                            if grainline_info:
+                                                                gl_start, gl_end = grainline_info
+                                                                grainline_cm = ((gl_start[0]/10, gl_start[1]/10), (gl_end[0]/10, gl_end[1]/10))
 
                                                             # 사이즈별 벌수 적용
                                                             if re_has_multi and size_name:
@@ -2837,24 +3431,28 @@ if uploaded_file is not None:
                                                                 'coords_cm': coords_cm,
                                                                 'quantity': quantity,
                                                                 'pattern_id': pattern_id,
-                                                                'area_cm2': poly.area / 100
+                                                                'area_cm2': poly.area / 100,
+                                                                'grainline_cm': grainline_cm
                                                             })
 
                                                     width_cm = result['width_cm']
+                                                    # 원단별 패턴 버퍼 (저장된 값 또는 기본값)
+                                                    fabric_buffer = result.get('buffer', st.session_state.get('nest_buffer', 0))
 
-                                                    # Sparrow 네스팅 실행
+                                                    # Sparrow 네스팅 실행 (버퍼로 패턴 둘레 확장)
                                                     if SPARROW_AVAILABLE:
                                                         new_result = run_sparrow_nesting(
                                                             pattern_data, width_cm,
                                                             st.session_state.get('sparrow_time', 30),
                                                             st.session_state.get('nest_rotation', True),
-                                                            st.session_state.get('nest_spacing', 0),
-                                                            st.session_state.get('nest_mirror', False)
+                                                            0,
+                                                            st.session_state.get('nest_mirror', False),
+                                                            fabric_buffer
                                                         )
                                                     else:
                                                         engine = NestingEngine(
                                                             sheet_width=width_cm * 10,
-                                                            spacing=st.session_state.get('nest_spacing', 0),
+                                                            spacing=fabric_buffer,  # 기본 엔진은 spacing으로 대체
                                                             target_efficiency=80
                                                         )
                                                         for p in pattern_data:
@@ -2871,6 +3469,7 @@ if uploaded_file is not None:
                                                     new_result['marker_quantity'] = new_qty
                                                     new_result['size_quantities'] = re_size_quantities if re_has_multi else {}
                                                     new_result['has_multiple_sizes'] = re_has_multi
+                                                    new_result['buffer'] = fabric_buffer  # 원단별 패턴 버퍼 유지
 
                                                     # 결과 업데이트
                                                     st.session_state.nesting_results[fabric] = new_result
@@ -2928,16 +3527,28 @@ if uploaded_file is not None:
                                         row = st.session_state.df.loc[idx]
                                         poly = patterns[idx][0]
                                         size_name = patterns[idx][3]
+                                        grainline_info = patterns[idx][7] if len(patterns[idx]) > 7 else None
                                         coords = list(poly.exterior.coords)[:-1]
                                         coords_cm = [(p[0] / 10, p[1] / 10) for p in coords]
+
+                                        # 그레인라인 좌표도 cm로 변환
+                                        grainline_cm = None
+                                        if grainline_info:
+                                            gl_start, gl_end = grainline_info
+                                            grainline_cm = ((gl_start[0]/10, gl_start[1]/10), (gl_end[0]/10, gl_end[1]/10))
+
                                         base_id = str(row['구분'])[:12] if row['구분'] else f"P{idx+1}"
                                         pattern_id = f"{base_id}\n{size_name[:4]}" if size_name else base_id
                                         base_pattern_data.append({
                                             'coords_cm': coords_cm,
                                             'base_quantity': int(row['수량']),
                                             'pattern_id': pattern_id,
-                                            'area_cm2': poly.area / 100
+                                            'area_cm2': poly.area / 100,
+                                            'grainline_cm': grainline_cm
                                         })
+
+                                # 원단별 패턴 버퍼 (저장된 값 또는 기본값)
+                                fabric_buffer = result.get('buffer', st.session_state.get('nest_buffer', 0))
 
                                 # 벌수 2~5까지 시도하여 최적 효율 찾기
                                 for try_qty in range(2, 6):
@@ -2947,22 +3558,24 @@ if uploaded_file is not None:
                                             'coords_cm': p['coords_cm'],
                                             'quantity': p['base_quantity'] * try_qty,
                                             'pattern_id': p['pattern_id'],
-                                            'area_cm2': p['area_cm2']
+                                            'area_cm2': p['area_cm2'],
+                                            'grainline_cm': p.get('grainline_cm')
                                         })
 
-                                    # 네스팅 실행
+                                    # 네스팅 실행 (버퍼로 패턴 둘레 확장)
                                     if SPARROW_AVAILABLE:
                                         test_result = run_sparrow_nesting(
                                             pattern_data, width_cm,
                                             st.session_state.get('sparrow_time', 30),
                                             st.session_state.get('nest_rotation', True),
-                                            st.session_state.get('nest_spacing', 0),
-                                            st.session_state.get('nest_mirror', False)
+                                            0,
+                                            st.session_state.get('nest_mirror', False),
+                                            fabric_buffer
                                         )
                                     else:
                                         engine = NestingEngine(
                                             sheet_width=width_cm * 10,
-                                            spacing=st.session_state.get('nest_spacing', 0),
+                                            spacing=fabric_buffer,  # 기본 엔진은 spacing으로 대체
                                             target_efficiency=80
                                         )
                                         for p in pattern_data:
