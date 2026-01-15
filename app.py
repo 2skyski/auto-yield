@@ -2575,12 +2575,8 @@ if uploaded_file is not None:
                 size_cols = st.columns(len(selected_sizes))
                 for si, size in enumerate(selected_sizes):
                     with size_cols[si]:
-                        # 전체 벌수 변경 시 동기화된 값 사용
-                        if global_qty_changed:
-                            current_val = default_qty
-                            size_quantities[size] = default_qty  # 네스팅에 바로 반영
-                        else:
-                            current_val = st.session_state.get(f"size_qty_{si}", default_qty)
+                        # session_state에서 값 가져오기 (없으면 전체 벌수 사용)
+                        current_val = st.session_state.get(f"size_qty_{si}", default_qty)
 
                         input_val = st.number_input(
                             size,
@@ -2588,9 +2584,8 @@ if uploaded_file is not None:
                             key=f"size_qty_{si}",
                             help=f"{size} 사이즈 벌수 (0=제외)"
                         )
-                        # 개별 변경값 반영
-                        if not global_qty_changed:
-                            size_quantities[size] = input_val
+                        # 항상 size_quantities에 반영
+                        size_quantities[size] = input_val
 
         if run_nesting:
             import time
