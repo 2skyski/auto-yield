@@ -787,7 +787,7 @@ def create_overlay_visualization(patterns_group, selected_sizes, all_sizes, glob
     import matplotlib.pyplot as plt
     import matplotlib.lines as mlines
 
-    fig, ax = plt.subplots(figsize=(4, 4))
+    fig, ax = plt.subplots(figsize=(6, 6))  # 패턴 크게 표시
 
     # 사이즈별 색상 (파랑→빨강 그라데이션)
     size_colors = {}
