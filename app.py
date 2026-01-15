@@ -2544,26 +2544,41 @@ if uploaded_file is not None:
                         label_visibility="collapsed"
                     )
                 with col3:
+                    # 전체 벌수 (모든 사이즈에 동일 적용)
                     marker_quantities[fabric] = st.number_input(
                         "벌수",
                         min_value=1, max_value=10, value=1,
                         key=f"marker_qty_{i}",
                         label_visibility="collapsed",
-                        disabled=has_multiple_sizes  # 사이즈별 벌수 사용시 비활성화
+                        disabled=False  # 항상 활성화
                     )
 
             # 사이즈별 벌수 설정 (사이즈가 2개 이상일 때만 표시)
             if has_multiple_sizes:
                 st.markdown("---")
-                st.markdown("**📏 사이즈별 벌수**")
+
+                # 전체 벌수 값 (첫 번째 원단 기준)
+                default_qty = list(marker_quantities.values())[0] if marker_quantities else 1
+
+                # 이전 전체 벌수 값과 비교하여 변경 감지
+                prev_global_qty = st.session_state.get('_prev_global_qty', 1)
+                if default_qty != prev_global_qty:
+                    # 전체 벌수가 변경되면 모든 사이즈 벌수 동기화
+                    for si in range(len(selected_sizes)):
+                        st.session_state[f"size_qty_{si}"] = default_qty
+                    st.session_state['_prev_global_qty'] = default_qty
+
+                st.markdown("**📏 사이즈별 벌수** (위 벌수 변경 시 모든 사이즈에 적용)")
 
                 # 사이즈별 벌수 입력 (가로 배치)
                 size_cols = st.columns(len(selected_sizes))
                 for si, size in enumerate(selected_sizes):
                     with size_cols[si]:
+                        # session_state에서 개별 값이 없으면 전체 벌수 사용
+                        current_val = st.session_state.get(f"size_qty_{si}", default_qty)
                         size_quantities[size] = st.number_input(
                             size,
-                            min_value=0, max_value=10, value=1,
+                            min_value=0, max_value=10, value=current_val,
                             key=f"size_qty_{si}",
                             help=f"{size} 사이즈 벌수 (0=제외)"
                         )
