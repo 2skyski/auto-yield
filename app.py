@@ -384,19 +384,24 @@ def create_sparrow_visualization(result, sheet_width_cm):
                 label = raw_id
             ax.text(cx, cy, label, ha='center', va='center', fontsize=4, fontweight='bold')
 
-            # 그레인라인 표시 (빨간 점선)
+            # 그레인라인 표시 (검정 실선, 크기 50%)
             grainline = p.get('grainline')
             if grainline:
                 gl_start, gl_end = grainline
-                ax.plot([gl_start[0], gl_end[0]], [gl_start[1], gl_end[1]],
-                        'r-', linewidth=0.8, linestyle='--', alpha=0.8)
+                # 그레인라인 크기를 50%로 축소 (중심점 기준)
+                cx_gl = (gl_start[0] + gl_end[0]) / 2
+                cy_gl = (gl_start[1] + gl_end[1]) / 2
+                gl_start_scaled = (cx_gl + (gl_start[0] - cx_gl) * 0.5, cy_gl + (gl_start[1] - cy_gl) * 0.5)
+                gl_end_scaled = (cx_gl + (gl_end[0] - cx_gl) * 0.5, cy_gl + (gl_end[1] - cy_gl) * 0.5)
+                ax.plot([gl_start_scaled[0], gl_end_scaled[0]], [gl_start_scaled[1], gl_end_scaled[1]],
+                        'k-', linewidth=0.4, alpha=0.8)
                 # 화살표 머리 (끝점에)
-                dx = gl_end[0] - gl_start[0]
-                dy = gl_end[1] - gl_start[1]
+                dx = gl_end_scaled[0] - gl_start_scaled[0]
+                dy = gl_end_scaled[1] - gl_start_scaled[1]
                 arrow_scale = 0.15
-                ax.annotate('', xy=(gl_end[0], gl_end[1]),
-                            xytext=(gl_end[0] - dx*arrow_scale, gl_end[1] - dy*arrow_scale),
-                            arrowprops=dict(arrowstyle='->', color='red', lw=0.8))
+                ax.annotate('', xy=(gl_end_scaled[0], gl_end_scaled[1]),
+                            xytext=(gl_end_scaled[0] - dx*arrow_scale, gl_end_scaled[1] - dy*arrow_scale),
+                            arrowprops=dict(arrowstyle='->', color='black', lw=0.4))
 
     ax.set_xlim(-1, sheet_width_cm + 1)
     ax.set_ylim(-1, used_length_cm + 1)
@@ -863,20 +868,8 @@ def get_cached_thumbnail(idx, poly, fabric_name, zoom_span, grainline_info=None)
     ax.plot(x, y, 'k-', lw=0.5)
     ax.fill(x, y, color=get_fabric_color_hex(fabric_name), alpha=0.6)
 
-    # 그레인라인 표시 (빨간 점선, 화살표 - 항상 아래 방향)
-    if grainline_info:
-        gl_start, gl_end = grainline_info
-        # 화살표가 위를 향하면 (end.y > start.y) 시작점과 끝점을 바꿔서 아래로 향하게 함
-        if gl_end[1] > gl_start[1]:
-            gl_start, gl_end = gl_end, gl_start
-        ax.plot([gl_start[0], gl_end[0]], [gl_start[1], gl_end[1]],
-                'r-', lw=1.5, linestyle='--', alpha=0.9)
-        # 화살표 머리 (끝점에 - 항상 아래 방향)
-        dx = gl_end[0] - gl_start[0]
-        dy = gl_end[1] - gl_start[1]
-        ax.annotate('', xy=(gl_end[0], gl_end[1]),
-                    xytext=(gl_end[0] - dx*0.15, gl_end[1] - dy*0.15),
-                    arrowprops=dict(arrowstyle='->', color='red', lw=1.5))
+    # 그레인라인 - 일괄수정도구 썸네일에서는 숨김 처리
+    pass
 
     ax.set_xlim(poly.centroid.x - zoom_span/2, poly.centroid.x + zoom_span/2)
     ax.set_ylim(poly.centroid.y - zoom_span/2, poly.centroid.y + zoom_span/2)
