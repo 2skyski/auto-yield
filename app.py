@@ -1606,6 +1606,7 @@ def process_dxf(file_path, selected_sizes=None):
         selected_sizes: 선택된 사이즈 목록 (None이면 전체 로딩)
     """
     import re
+    print(f"[DEBUG] process_dxf 시작: {file_path}, selected_sizes={selected_sizes}")
 
     try:
         # 특수문자 전처리 (블록명에 <&> 등이 있으면 치환)
@@ -1621,6 +1622,22 @@ def process_dxf(file_path, selected_sizes=None):
 
         final = []
         detected_base_size = None  # DXF에서 추출한 기준사이즈
+        unit_scale = 1.0  # 단위 스케일 (인치→mm 변환용)
+
+        # 단위 정보 검색 (Units: ENGLISH → 인치, Units: METRIC → cm/mm)
+        # 시스템 내부 단위는 mm이므로 인치→mm로 변환
+        for entity in msp:
+            if entity.dxftype() == 'TEXT':
+                text = entity.dxf.text.upper().strip()
+                if text.startswith('UNITS:'):
+                    unit_value = text.split(':', 1)[1].strip()
+                    if unit_value == 'ENGLISH':
+                        unit_scale = 25.4  # 인치 → mm
+                        print(f"[DEBUG] 단위 감지: ENGLISH (인치), 스케일 {unit_scale}배 적용 (인치→mm)")
+                    elif unit_value == 'METRIC':
+                        unit_scale = 1.0  # 이미 mm
+                        print(f"[DEBUG] 단위 감지: METRIC, 스케일 없음")
+                    break
 
         # 원단명 매핑 (CATEGORY 또는 ANNOTATION 값 → 표준 원단명)
         fabric_map = {
@@ -1655,11 +1672,14 @@ def process_dxf(file_path, selected_sizes=None):
                 break
 
         # 방법 1: INSERT 블록 기반 추출 (YUKA CAD 등)
+        insert_count = 0
         for entity in msp:
             if entity.dxftype() == 'INSERT':
+                insert_count += 1
                 block_name = entity.dxf.name
                 try:
                     block = doc.blocks.get(block_name)
+                    print(f"[DEBUG] 블록 처리 시작: {block_name}")
                     max_poly = None
                     max_area = 0
                     pattern_name = ""
@@ -1794,6 +1814,88 @@ def process_dxf(file_path, selected_sizes=None):
                                 elif not pattern_name:
                                     pattern_name = val  # 영문 부위명 (한글 없을 때만)
 
+                    # 닫힌 POLYLINE/LWPOLYLINE이 없으면 열린 선분들을 연결하여 폴리곤 생성
+                    if not max_poly:
+                        print(f"[DEBUG] 닫힌 폴리라인 없음, 열린 선분 연결 시도: {block_name}")
+                        block_lines = []
+                        seen_lines = set()  # 중복 선분 제거용
+
+                        for be in block:
+                            if be.dxftype() == 'POLYLINE' and not be.is_closed:
+                                pts = list(be.points())
+                                if len(pts) >= 2:
+                                    coords = tuple((round(p[0], 4), round(p[1], 4)) for p in pts)
+                                    coords_rev = tuple(reversed(coords))
+                                    if coords not in seen_lines and coords_rev not in seen_lines:
+                                        seen_lines.add(coords)
+                                        block_lines.append(LineString(coords))
+                            elif be.dxftype() == 'LWPOLYLINE' and not be.closed:
+                                pts = list(be.points())
+                                if len(pts) >= 2:
+                                    coords = tuple((round(p[0], 4), round(p[1], 4)) for p in pts)
+                                    coords_rev = tuple(reversed(coords))
+                                    if coords not in seen_lines and coords_rev not in seen_lines:
+                                        seen_lines.add(coords)
+                                        block_lines.append(LineString(coords))
+                            elif be.dxftype() == 'LINE':
+                                start = (round(be.dxf.start.x, 4), round(be.dxf.start.y, 4))
+                                end = (round(be.dxf.end.x, 4), round(be.dxf.end.y, 4))
+                                line_key = (start, end)
+                                line_key_rev = (end, start)
+                                if line_key not in seen_lines and line_key_rev not in seen_lines:
+                                    seen_lines.add(line_key)
+                                    block_lines.append(LineString([start, end]))
+                            elif be.dxftype() == 'ARC':
+                                # ARC를 선분들로 근사
+                                try:
+                                    center = (be.dxf.center.x, be.dxf.center.y)
+                                    radius = be.dxf.radius
+                                    start_angle = be.dxf.start_angle
+                                    end_angle = be.dxf.end_angle
+                                    import math
+                                    # 각도 정규화
+                                    if end_angle < start_angle:
+                                        end_angle += 360
+                                    angle_span = end_angle - start_angle
+                                    num_segments = max(8, int(angle_span / 5))  # 최소 8개 세그먼트
+                                    arc_pts = []
+                                    for i in range(num_segments + 1):
+                                        angle = math.radians(start_angle + (angle_span * i / num_segments))
+                                        x = center[0] + radius * math.cos(angle)
+                                        y = center[1] + radius * math.sin(angle)
+                                        arc_pts.append((x, y))
+                                    if len(arc_pts) >= 2:
+                                        coords = tuple((round(x, 4), round(y, 4)) for x, y in arc_pts)
+                                        coords_rev = tuple(reversed(coords))
+                                        if coords not in seen_lines and coords_rev not in seen_lines:
+                                            seen_lines.add(coords)
+                                            block_lines.append(LineString(arc_pts))
+                                except:
+                                    pass
+
+                        # 선분들을 합쳐서 폴리곤 생성
+                        print(f"[DEBUG] 수집된 선분 수 (중복 제거 후): {len(block_lines)}")
+                        if block_lines:
+                            try:
+                                # 좌표 반올림으로 연결 오차 허용
+                                rounded_lines = []
+                                for line in block_lines:
+                                    coords = list(line.coords)
+                                    rounded_coords = [(round(x, 2), round(y, 2)) for x, y in coords]
+                                    rounded_lines.append(LineString(rounded_coords))
+
+                                polygons_from_lines = list(polygonize(rounded_lines))
+                                print(f"[DEBUG] 생성된 폴리곤 수: {len(polygons_from_lines)}")
+                                for poly in polygons_from_lines:
+                                    if not poly.is_valid:
+                                        poly = poly.buffer(0)
+                                    if poly.is_valid and poly.area > max_area:
+                                        max_area = poly.area
+                                        max_poly = poly
+                                print(f"[DEBUG] 최종 max_area: {max_area}, max_poly: {max_poly is not None}")
+                            except Exception as e:
+                                print(f"[DEBUG] 폴리곤 생성 오류: {e}")
+
                     # 원단명 기본값: 겉감
                     if not fabric_name:
                         fabric_name = "겉감"
@@ -1807,8 +1909,52 @@ def process_dxf(file_path, selected_sizes=None):
                     if piece_name and (not pattern_group or pattern_group.isdigit()):
                         pattern_group = piece_name
 
-                    # 10cm² 이상인 패턴만 추가 (작은 부속 패턴 포함)
-                    if max_poly and (max_area / 100) >= 10:
+                    # 레이어 6의 LINE이 있으면 대칭선(Fold Line)으로 인식하여 미러링
+                    if max_poly:
+                        fold_line = None
+                        for be in block:
+                            if be.dxftype() == 'LINE':
+                                layer = be.dxf.layer if hasattr(be.dxf, 'layer') else ''
+                                if layer == '6':
+                                    start = (be.dxf.start.x, be.dxf.start.y)
+                                    end = (be.dxf.end.x, be.dxf.end.y)
+                                    fold_line = (start, end)
+                                    break
+
+                        if fold_line:
+                            # 대칭선을 기준으로 미러링
+                            from shapely import affinity
+                            start, end = fold_line
+
+                            # 대칭선이 수평선인지 수직선인지 판단
+                            dx = abs(end[0] - start[0])
+                            dy = abs(end[1] - start[1])
+
+                            if dx > dy:  # 수평선 (Y축 기준 미러링)
+                                # 대칭선의 Y 좌표
+                                mirror_y = (start[1] + end[1]) / 2
+                                mirrored = affinity.scale(max_poly, xfact=1, yfact=-1, origin=(0, mirror_y))
+                            else:  # 수직선 (X축 기준 미러링)
+                                # 대칭선의 X 좌표
+                                mirror_x = (start[0] + end[0]) / 2
+                                mirrored = affinity.scale(max_poly, xfact=-1, yfact=1, origin=(mirror_x, 0))
+
+                            # 원본과 미러링된 폴리곤 합치기 (약간 버퍼로 겹침 보장)
+                            combined = max_poly.buffer(0.01).union(mirrored.buffer(0.01)).buffer(-0.01)
+                            if combined.is_valid:
+                                # MultiPolygon인 경우 가장 큰 폴리곤 선택
+                                from shapely.geometry import MultiPolygon
+                                if isinstance(combined, MultiPolygon):
+                                    combined = max(combined.geoms, key=lambda g: g.area)
+                                if isinstance(combined, Polygon):
+                                    max_poly = combined
+                                    max_area = combined.area
+                                    print(f"[DEBUG] 미러링 적용: {block_name}, 새 면적={max_area:.2f}")
+
+                    # 유효한 패턴만 추가 (너무 작은 패턴 제외)
+                    # 단위에 따라 면적이 다르므로 상대적으로 작은 패턴만 제외 (1 이상)
+                    print(f"[DEBUG] 필터 체크: max_area={max_area}, 조건={max_area >= 1}")
+                    if max_poly and max_area >= 1:
                         # 선택된 사이즈 필터링 (selected_sizes가 지정된 경우)
                         if selected_sizes is not None:
                             # 사이즈명을 대문자로 비교
@@ -1828,10 +1974,24 @@ def process_dxf(file_path, selected_sizes=None):
                             gl_start, gl_end = rotate_grainline_coords(gl_start, gl_end, rotation_applied, centroid)
                             grainline_info = (gl_start, gl_end)
 
+                        # 단위 스케일 적용 (인치 → cm 변환)
+                        if unit_scale != 1.0:
+                            from shapely import affinity
+                            max_poly = affinity.scale(max_poly, xfact=unit_scale, yfact=unit_scale, origin=(0, 0))
+                            if grainline_info:
+                                gl_start, gl_end = grainline_info
+                                gl_start = (gl_start[0] * unit_scale, gl_start[1] * unit_scale)
+                                gl_end = (gl_end[0] * unit_scale, gl_end[1] * unit_scale)
+                                grainline_info = (gl_start, gl_end)
+                            max_area = max_poly.area
+
                         # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity, grainline_info)
                         final.append((max_poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity, grainline_info))
-                except:
-                    pass
+                        print(f"[DEBUG] 패턴 추가: {pattern_name}, size={size_name}, area={max_area:.2f}")
+                except Exception as e:
+                    print(f"[DEBUG] 블록 처리 오류: {block_name} - {e}")
+                    import traceback
+                    traceback.print_exc()
 
         # 방법 2: INSERT가 없으면 기존 방식 (레거시 DXF 호환)
         if not final:
@@ -1881,15 +2041,24 @@ def process_dxf(file_path, selected_sizes=None):
                     if grainline_angle is not None:
                         centroid = (p.centroid.x, p.centroid.y)
                         p, _ = rotate_polygon_to_vertical_grain(p, grainline_angle)
+                    # 단위 스케일 적용 (인치 → cm 변환)
+                    if unit_scale != 1.0:
+                        from shapely import affinity
+                        p = affinity.scale(p, xfact=unit_scale, yfact=unit_scale, origin=(0, 0))
+
                     added_polys.append(p)
                     # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_qty, grainline_info)
                     final.append((p, "", "겉감", "", str(idx + 1), "", 0, grainline_info))
 
         # 면적 기준 정렬 (큰 것부터)
         final.sort(key=lambda x: x[0].area, reverse=True)
+        print(f"[DEBUG] process_dxf 완료: {len(final)}개 패턴 추출")
         return final, detected_base_size
 
     except Exception as e:
+        print(f"[DEBUG] process_dxf 오류: {e}")
+        import traceback
+        traceback.print_exc()
         return [], None
 
 
