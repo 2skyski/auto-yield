@@ -1161,17 +1161,82 @@ def extract_style_no(file_path):
     return ""
 
 
-def detect_grainline(block, return_coords=False):
+def is_symmetric_polygon(poly, tolerance=0.02):
+    """
+    폴리곤이 좌우대칭인지 판단합니다.
+
+    Args:
+        poly: Shapely Polygon
+        tolerance: 대칭 판단 허용 오차 (면적 비율, 기본 2%)
+
+    Returns:
+        bool: 좌우대칭이면 True
+    """
+    from shapely import affinity
+    from shapely.ops import unary_union
+
+    if not poly or poly.is_empty:
+        return False
+
+    # 폴리곤의 중심과 바운딩 박스
+    centroid = poly.centroid
+    minx, miny, maxx, maxy = poly.bounds
+
+    # Y축 (수직 중심선) 기준으로 좌우 반전
+    mirrored = affinity.scale(poly, xfact=-1, yfact=1, origin=centroid)
+
+    # 원본과 반전본의 교집합 면적 비교
+    try:
+        intersection = poly.intersection(mirrored)
+        intersection_area = intersection.area
+        original_area = poly.area
+
+        # 교집합 면적이 원본의 (1-tolerance) 이상이면 대칭
+        if original_area > 0 and intersection_area / original_area >= (1 - tolerance):
+            return True
+    except:
+        pass
+
+    return False
+
+
+def get_center_vertical_grainline(poly):
+    """
+    폴리곤의 중심 수직선 좌표를 반환합니다.
+
+    Args:
+        poly: Shapely Polygon
+
+    Returns:
+        (angle, start, end): 각도 90도, 시작점, 끝점
+    """
+    minx, miny, maxx, maxy = poly.bounds
+    center_x = (minx + maxx) / 2
+    height = maxy - miny
+
+    # 패턴 높이의 70% 정도 길이로 결선 생성
+    line_length = height * 0.7
+    center_y = (miny + maxy) / 2
+
+    start = (center_x, center_y + line_length / 2)
+    end = (center_x, center_y - line_length / 2)
+
+    return 90.0, start, end
+
+
+def detect_grainline(block, return_coords=False, polygon=None):
     """
     블록 내에서 그레인라인(결방향)을 감지합니다.
 
     그레인라인 감지 방법:
     1. 레이어명에 'GRAIN', 'GL', '결', '7' 등 포함된 엔티티
-    2. 그레인라인 레이어가 없으면 블록 내 독립 LINE 중 가장 긴 것 (100단위 이상)
+    2. 그레인라인 레이어가 없으면 독립 LINE 중 가장 긴 것 (100단위 이상)
+    3. 위 방법으로도 없으면 좌우대칭 패턴인 경우 중심 수직선 사용
 
     Args:
         block: ezdxf 블록 객체
         return_coords: True면 (angle, start, end) 반환, False면 angle만 반환
+        polygon: Shapely Polygon (좌우대칭 판단용, 선택)
 
     Returns:
         return_coords=False: angle (그레인라인 각도) 또는 None
@@ -1230,6 +1295,9 @@ def detect_grainline(block, return_coords=False):
                     })
 
     if not candidate_lines:
+        # 후보 라인이 없으면 좌우대칭 체크
+        if polygon and is_symmetric_polygon(polygon):
+            return get_center_vertical_grainline(polygon) if return_coords else 90.0
         return (None, None, None) if return_coords else None
 
     # 그레인라인 우선순위:
@@ -1247,10 +1315,27 @@ def detect_grainline(block, return_coords=False):
         if long_lines:
             best = max(long_lines, key=lambda x: x['length'])
 
+    # 좌우대칭 패턴인 경우: 결선이 중심에서 벗어났으면 중심 수직선 사용
+    if best and polygon and is_symmetric_polygon(polygon):
+        minx, miny, maxx, maxy = polygon.bounds
+        center_x = (minx + maxx) / 2
+        width = maxx - minx
+
+        # 결선의 중심 X 좌표
+        gl_center_x = (best['start'][0] + best['end'][0]) / 2
+
+        # 결선이 패턴 중심에서 폭의 5% 이상 벗어났으면 중심 수직선 사용
+        if abs(gl_center_x - center_x) > width * 0.05:
+            return get_center_vertical_grainline(polygon) if return_coords else 90.0
+
     if best:
         if return_coords:
             return best['angle'], best['start'], best['end']
         return best['angle']
+
+    # 최종적으로 결선을 찾지 못하면 좌우대칭 체크
+    if polygon and is_symmetric_polygon(polygon):
+        return get_center_vertical_grainline(polygon) if return_coords else 90.0
 
     return (None, None, None) if return_coords else None
 
@@ -1388,6 +1473,9 @@ def detect_grainline_for_polygon(msp, poly):
                 })
 
     if not candidate_lines:
+        # 후보 라인이 없으면 좌우대칭 체크
+        if is_symmetric_polygon(poly):
+            return 90.0  # 좌우대칭이면 수직(90도) 결선
         return None
 
     # 그레인라인 레이어에 있는 선 우선
@@ -1395,6 +1483,10 @@ def detect_grainline_for_polygon(msp, poly):
     if grainline_layer_lines:
         best = max(grainline_layer_lines, key=lambda x: x['length'])
         return best['angle']
+
+    # 최종적으로 결선을 찾지 못하면 좌우대칭 체크
+    if is_symmetric_polygon(poly):
+        return 90.0
 
     return None
 
@@ -1727,7 +1819,7 @@ def process_dxf(file_path, selected_sizes=None):
 
                         # 그레인라인 감지 및 패턴 회전 (수직 정렬)
                         grainline_info = None  # (start, end) 좌표
-                        grainline_angle, gl_start, gl_end = detect_grainline(block, return_coords=True)
+                        grainline_angle, gl_start, gl_end = detect_grainline(block, return_coords=True, polygon=max_poly)
                         if grainline_angle is not None and gl_start and gl_end:
                             # 패턴 회전
                             centroid = (max_poly.centroid.x, max_poly.centroid.y)
