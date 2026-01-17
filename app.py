@@ -374,14 +374,24 @@ def create_sparrow_visualization(result, sheet_width_cm):
             except:
                 cx = sum(xs) / len(xs)
                 cy = sum(ys) / len(ys)
-            # 패턴ID에서 _인덱스 제거하여 "구분12자\n사이즈4자" 형식 유지
+            # 패턴ID에서 패턴이름 + 사이즈 표시
+            # pattern_id 형식: "인덱스:패턴이름\n사이즈_수량인덱스"
             raw_id = p['pattern_id']
-            if '_' in raw_id.split('\n')[-1]:
-                # 마지막 _인덱스 제거
-                parts = raw_id.rsplit('_', 1)
-                label = parts[0]
+            parts = raw_id.split('\n')
+            # 첫 번째 줄에서 "인덱스:" 제거하고 패턴이름 추출
+            first_line = parts[0]
+            if ':' in first_line:
+                pattern_name = first_line.split(':', 1)[1]
             else:
-                label = raw_id
+                pattern_name = first_line
+
+            # 사이즈 추출 (두 번째 줄에서 _수량인덱스 제거)
+            if len(parts) > 1:
+                size_with_idx = parts[1].strip()
+                size_part = size_with_idx.rsplit('_', 1)[0] if '_' in size_with_idx else size_with_idx
+                label = f"{pattern_name}\n{size_part}" if pattern_name else size_part
+            else:
+                label = pattern_name
             ax.text(cx, cy, label, ha='center', va='center', fontsize=4, fontweight='bold')
 
             # 그레인라인 표시 (검정 실선, 크기 50%)
@@ -539,10 +549,54 @@ st.markdown("""
     .stFileUploader small {
         font-size: 13px !important;
     }
+
+    /* 상세 리스트 데이터 에디터 - 헤더와 데이터 가운데 정렬 */
+    div[data-testid="stDataFrame"] th,
+    div[data-testid="stDataFrame"] td,
+    div[data-testid="stDataEditor"] th,
+    div[data-testid="stDataEditor"] td {
+        text-align: center !important;
+    }
+    /* glide-data-grid 셀 가운데 정렬 */
+    .dvn-scroller .dvn-cell,
+    .gdg-cell {
+        text-align: center !important;
+        justify-content: center !important;
+    }
+    /* data_editor 헤더 가운데 정렬 */
+    .gdg-header-cell,
+    .dvn-header-cell {
+        text-align: center !important;
+        justify-content: center !important;
+    }
+
+    /* 요척 결과 메트릭 - 가운데 정렬 */
+    div[data-testid="stMetric"] {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        text-align: center !important;
+    }
+    div[data-testid="stMetric"] label {
+        width: 100% !important;
+        text-align: center !important;
+    }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        width: 100% !important;
+        text-align: center !important;
+    }
+
+    /* 네스팅 시뮬레이션 원단 설정 - 입력 필드 가운데 정렬 */
+    div[data-testid="stNumberInput"] input {
+        text-align: center !important;
+    }
+    div[data-testid="stTextInput"] input {
+        text-align: center !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<h1 style='font-size: 1.8rem; margin-top: 0; margin-bottom: 0.5rem; white-space: nowrap;'>👕 스마트 의류 요척 산출서</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='font-size: 1.8rem; margin-top: 0; margin-bottom: 0.5rem; white-space: nowrap;'>👕 스마트 의류 요척(자동마카) 산출서</h1>", unsafe_allow_html=True)
 
 # Streamlit 버전 호환성 체크 (팝업창 기능용)
 try:
@@ -558,8 +612,16 @@ except: pass
 # 2. 헬퍼 함수 및 유틸리티 (Helpers)
 # ==============================================================================
 
-def export_nesting_to_excel(nesting_results, timestamp):
-    """네스팅 결과를 엑셀로 내보내기 (한 시트에 모든 데이터 순서대로)"""
+def export_nesting_to_excel(nesting_results, timestamp, style_no=None, selected_sizes=None, base_size=None):
+    """네스팅 결과를 엑셀로 내보내기 (한 시트에 모든 데이터 순서대로)
+
+    Args:
+        nesting_results: 네스팅 결과 딕셔너리
+        timestamp: 작업일시
+        style_no: 스타일번호 (DXF 파일명)
+        selected_sizes: 선택된 사이즈 목록
+        base_size: 기준사이즈
+    """
     from io import BytesIO
     import pandas as pd
     from openpyxl import Workbook
@@ -578,6 +640,7 @@ def export_nesting_to_excel(nesting_results, timestamp):
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_font_white = Font(bold=True, size=12, color="FFFFFF")
     section_font = Font(bold=True, size=14)
+    title_font = Font(bold=True, size=16)
     thin_border = Border(
         left=Side(style='thin'),
         right=Side(style='thin'),
@@ -586,6 +649,25 @@ def export_nesting_to_excel(nesting_results, timestamp):
     )
 
     current_row = 1
+
+    # === 0. 제목 정보 섹션 ===
+    # 제목은 항상 표시
+    ws.cell(row=current_row, column=1, value="📐 스마트 의류 요척(자동마카) 산출서").font = title_font
+    current_row += 1
+
+    # 스타일번호 표시
+    if style_no and style_no.strip():
+        ws.cell(row=current_row, column=1, value=f"스타일번호: {style_no}").font = header_font
+        current_row += 1
+
+    # 선택 사이즈 표시
+    if selected_sizes and len(selected_sizes) > 0:
+        size_display = ', '.join(selected_sizes)
+        base_display = f" (기준: {base_size})" if base_size else ""
+        ws.cell(row=current_row, column=1, value=f"선택 사이즈: {size_display}{base_display}").font = header_font
+        current_row += 1
+
+    current_row += 1  # 빈 줄 추가
 
     # === 1. 마카 요약 섹션 ===
     ws.cell(row=current_row, column=1, value="■ 마카 요약").font = section_font
@@ -627,39 +709,6 @@ def export_nesting_to_excel(nesting_results, timestamp):
     current_row += 1
 
     fabric_list = [f for f, r in nesting_results.items() if r.get('success')]
-
-    # 배치 상세 테이블 추가 함수
-    def add_placement_table(start_row, start_col, fabric, result):
-        """마카 아래에 배치 상세 테이블 추가"""
-        row = start_row
-        if result.get('placements'):
-            ws.cell(row=row, column=start_col, value=f"배치 상세").font = Font(bold=True, size=9)
-            row += 1
-
-            placement_headers = ['번호', '패턴ID', 'X', 'Y', '회전']
-            for col_offset, header in enumerate(placement_headers):
-                cell = ws.cell(row=row, column=start_col + col_offset, value=header)
-                cell.font = Font(bold=True, size=8, color="FFFFFF")
-                cell.fill = PatternFill(start_color="70AD47", end_color="70AD47", fill_type="solid")
-                cell.border = thin_border
-                cell.alignment = Alignment(horizontal='center')
-            row += 1
-
-            for pi, p in enumerate(result['placements']):
-                row_data = [
-                    pi + 1,
-                    p.get('pattern_id', ''),
-                    round(p.get('x', 0), 1),
-                    round(p.get('y', 0), 1),
-                    p.get('rotation', 0)
-                ]
-                for col_offset, value in enumerate(row_data):
-                    cell = ws.cell(row=row, column=start_col + col_offset, value=value)
-                    cell.border = thin_border
-                    cell.alignment = Alignment(horizontal='center')
-                    cell.font = Font(size=8)
-                row += 1
-        return row
 
     # 2개씩 묶어서 처리
     for i in range(0, len(fabric_list), 2):
@@ -736,18 +785,7 @@ def export_nesting_to_excel(nesting_results, timestamp):
 
         # 마카 이미지 아래로 이동
         max_img_rows = max(img_rows1, img_rows2, 10)
-        current_row += max_img_rows + 2  # 2칸 아래
-
-        # 왼쪽 배치 상세 (A열)
-        detail_start_row = current_row
-        end_row1 = add_placement_table(current_row, 1, fabric1, result1)
-
-        # 오른쪽 배치 상세 (F열) - 있으면
-        end_row2 = current_row
-        if fabric2 and result2:
-            end_row2 = add_placement_table(current_row, 6, fabric2, result2)
-
-        current_row = max(end_row1, end_row2) + 2
+        current_row += max_img_rows + 2
 
     # 열 너비 조정
     ws.column_dimensions['A'].width = 15
@@ -1535,11 +1573,12 @@ def scan_dxf_sizes(file_path):
     전체 파싱 없이 사이즈 정보만 추출하여 선택 UI에 사용합니다.
 
     Returns:
-        list: 고유한 사이즈 목록 (정렬됨)
+        tuple: (사이즈 목록, 기준사이즈) - 기준사이즈가 없으면 중간 사이즈
     """
     import re
 
     sizes = set()
+    base_size = None  # 기준사이즈
 
     try:
         # 특수문자 전처리
@@ -1553,6 +1592,23 @@ def scan_dxf_sizes(file_path):
 
         msp = doc.modelspace()
 
+        # 기준사이즈 prefix 목록
+        base_prefixes = ['BASE_SIZE:', 'BASESIZE:', 'BASE SIZE:', 'BASE:',
+                        'REF_SIZE:', 'REFSIZE:', 'REF SIZE:',
+                        'SAMPLE_SIZE:', 'SAMPLESIZE:', 'SAMPLE SIZE:']
+
+        # 방법 0: modelspace 직접 TEXT에서 기준사이즈 추출
+        for entity in msp:
+            if entity.dxftype() == 'TEXT' and not base_size:
+                text = entity.dxf.text
+                text_upper = text.upper().strip()
+                for prefix in base_prefixes:
+                    if text_upper.startswith(prefix):
+                        base_val = text.split(':', 1)[1].strip().upper()
+                        if base_val:
+                            base_size = base_val
+                        break
+
         # 방법 1: INSERT 블록에서 사이즈 추출
         for entity in msp:
             if entity.dxftype() == 'INSERT':
@@ -1564,22 +1620,30 @@ def scan_dxf_sizes(file_path):
                     if re.match(r'^([0-9]*X{1,3}L?|[SML]|XS|\d{2,3})$', potential_size, re.IGNORECASE):
                         sizes.add(potential_size.upper())
 
-                # 블록 내 TEXT에서 SIZE: 필드 추출
+                # 블록 내 TEXT에서 SIZE: 및 기준사이즈 필드 추출
                 try:
                     block = doc.blocks.get(block_name)
                     for be in block:
                         if be.dxftype() == 'TEXT':
                             text = be.dxf.text
-                            text_upper = text.upper()
+                            text_upper = text.upper().strip()
                             if text_upper.startswith('SIZE:'):
                                 size_val = text.split(':', 1)[1].strip()
                                 if size_val:
                                     sizes.add(size_val.upper())
+                            # 기준사이즈 추출 (여러 패턴 지원)
+                            elif not base_size:
+                                for prefix in base_prefixes:
+                                    if text_upper.startswith(prefix):
+                                        base_val = text.split(':', 1)[1].strip().upper()
+                                        if base_val:
+                                            base_size = base_val
+                                        break
                 except:
                     pass
     except Exception as e:
         st.error(f"사이즈 스캔 오류: {e}")
-        return []
+        return [], None
 
     # 사이즈 정렬 (숫자 사이즈 우선, 문자 사이즈 후순)
     def size_sort_key(s):
@@ -1592,7 +1656,14 @@ def scan_dxf_sizes(file_path):
             return (1, size_order.index(s))
         return (2, s)
 
-    return sorted(list(sizes), key=size_sort_key)
+    sorted_sizes = sorted(list(sizes), key=size_sort_key)
+
+    # 기준사이즈가 없으면 중간 사이즈를 기준으로 설정
+    if not base_size and sorted_sizes:
+        mid_idx = len(sorted_sizes) // 2
+        base_size = sorted_sizes[mid_idx]
+
+    return sorted_sizes, base_size
 
 
 @st.cache_data
@@ -1760,9 +1831,9 @@ def process_dxf(file_path, selected_sizes=None):
                                         if key.upper() == cat_val.upper() or key == cat_val:
                                             fabric_name = mapped
                                             break
-                                    # 매핑 안 되면 원본 사용
-                                    if not fabric_name and cat_val:
-                                        fabric_name = cat_val
+                                    # 매핑 안 되면 기본값 "겉감" 사용
+                                    if not fabric_name:
+                                        fabric_name = "겉감"
 
                             # ANNOTATION 필드 처리 (대소문자 무시)
                             elif text_upper.startswith('ANNOTATION:'):
@@ -2233,8 +2304,9 @@ if uploaded_file is not None:
     # 1단계: 사이즈 스캔 (파일 업로드 직후)
     if st.session_state.dxf_sizes is None and tmp_path:
         with st.spinner("사이즈 목록 스캔 중..."):
-            scanned_sizes = scan_dxf_sizes(tmp_path)
+            scanned_sizes, scanned_base_size = scan_dxf_sizes(tmp_path)
             st.session_state.dxf_sizes = scanned_sizes
+            st.session_state.dxf_base_size = scanned_base_size  # 기준사이즈 저장
             # 사이즈가 1개 이하면 바로 선택 완료 처리 (선택 UI 불필요)
             if len(scanned_sizes) <= 1:
                 st.session_state.size_selection_done = True
@@ -2242,37 +2314,44 @@ if uploaded_file is not None:
 
     # 2단계: 사이즈 선택 UI (여러 사이즈가 있을 때)
     if st.session_state.dxf_sizes and len(st.session_state.dxf_sizes) > 1 and not st.session_state.size_selection_done:
-        st.info(f"📏 **{len(st.session_state.dxf_sizes)}개 사이즈 발견** - 불러올 사이즈를 선택하세요")
+        base_size = st.session_state.get('dxf_base_size')
+        st.info(f"📏 **{len(st.session_state.dxf_sizes)}개 사이즈 발견** (기준: {base_size}) - 불러올 사이즈를 선택하세요")
 
-        # 전체 선택/해제 버튼
-        col1, col2, col3 = st.columns([1, 1, 2])
-        with col1:
-            if st.button("✅ 전체 선택", use_container_width=True):
-                for size in st.session_state.dxf_sizes:
-                    st.session_state[f"size_chk_{size}"] = True
-                st.rerun()
-        with col2:
-            if st.button("⬜ 전체 해제", use_container_width=True):
-                for size in st.session_state.dxf_sizes:
-                    st.session_state[f"size_chk_{size}"] = False
-                st.rerun()
+        # 사이즈 체크박스 크기 확대 CSS
+        st.markdown("""
+        <style>
+        .size-select-container label {
+            font-size: 1.5rem !important;
+            font-weight: bold !important;
+        }
+        .size-select-container .stCheckbox > label > div[data-testid="stMarkdownContainer"] > p {
+            font-size: 1.5rem !important;
+        }
+        .size-select-container input[type="checkbox"] {
+            transform: scale(1.5);
+            margin-right: 10px;
+        }
+        </style>
+        """, unsafe_allow_html=True)
 
         # 사이즈 체크박스 (가로 배열)
+        st.markdown('<div class="size-select-container">', unsafe_allow_html=True)
         cols = st.columns(min(6, len(st.session_state.dxf_sizes)))
         for i, size in enumerate(st.session_state.dxf_sizes):
             col_idx = i % len(cols)
             with cols[col_idx]:
-                # 기본값: 전체 선택
-                default_val = st.session_state.get(f"size_chk_{size}", True)
+                # 기본값: 기준사이즈만 선택
+                default_val = st.session_state.get(f"size_chk_{size}", size == base_size)
                 st.checkbox(size, value=default_val, key=f"size_chk_{size}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
         # 선택 완료 버튼
-        selected_count = sum(1 for size in st.session_state.dxf_sizes if st.session_state.get(f"size_chk_{size}", True))
+        selected_count = sum(1 for size in st.session_state.dxf_sizes if st.session_state.get(f"size_chk_{size}", size == base_size))
         st.write(f"선택된 사이즈: **{selected_count}개** / 전체 {len(st.session_state.dxf_sizes)}개")
 
         if st.button(f"🚀 선택한 {selected_count}개 사이즈 불러오기", type="primary", use_container_width=True, disabled=(selected_count == 0)):
             # 선택된 사이즈 목록 저장
-            selected = [size for size in st.session_state.dxf_sizes if st.session_state.get(f"size_chk_{size}", True)]
+            selected = [size for size in st.session_state.dxf_sizes if st.session_state.get(f"size_chk_{size}", size == base_size)]
             st.session_state.selected_load_sizes = selected if selected else None
             st.session_state.size_selection_done = True
             st.rerun()
@@ -2536,45 +2615,36 @@ if uploaded_file is not None:
         # ----------------------------------------------------------------
         all_sizes = st.session_state.get('all_sizes', [])
         if len(all_sizes) >= 1:
-            # 기준사이즈 정보 표시
-            base_size = st.session_state.get('base_size')
+            # 기준사이즈 정보 표시 (원본 DXF 기준사이즈 우선 사용)
             detected_base = st.session_state.get('detected_base_size')
-            source_info = "(원본)" if detected_base and detected_base == base_size else "(중간)"
+            base_size = detected_base if detected_base else st.session_state.get('base_size')
 
             if len(all_sizes) == 1:
                 # 사이즈가 1개일 때: 간단한 정보만 표시
-                st.markdown(f"#### 📐 사이즈: **{all_sizes[0]}** {source_info}")
+                st.markdown(f"#### 📐 사이즈: **{all_sizes[0]}**")
                 st.session_state.selected_sizes = all_sizes.copy()
             else:
                 # 사이즈가 2개 이상일 때: 선택 UI 표시
-                st.markdown(f"#### 📐 사이즈 선택 (기준: **{base_size}** {source_info})")
+                # 개별 사이즈 체크박스 (기본값: 기준사이즈만 선택)
+                default_selected = [base_size] if base_size in all_sizes else all_sizes[:1]
+                selected_sizes = st.session_state.get('selected_sizes', default_selected)
+
+                # 선택된 사이즈 표시 (기준사이즈 포함)
+                selected_display = ', '.join(selected_sizes) if selected_sizes else '없음'
+                st.markdown(f"#### 📐 사이즈 선택 (기준: **{base_size}**, 선택: {selected_display})")
 
                 # 사이즈 선택 체크박스
-                size_cols = st.columns(min(len(all_sizes) + 2, 10))
+                size_cols = st.columns(min(len(all_sizes), 10))
 
-                # 전체 선택/해제 버튼
-                with size_cols[0]:
-                    if st.button("✅전체", key="size_all", width='stretch'):
-                        st.session_state.selected_sizes = all_sizes.copy()
-                        st.rerun()
-                with size_cols[1]:
-                    if st.button("⬜해제", key="size_none", width='stretch'):
-                        st.session_state.selected_sizes = []
-                        st.rerun()
-
-                # 개별 사이즈 체크박스
-                selected_sizes = st.session_state.get('selected_sizes', all_sizes)
                 new_selected = []
                 for idx, size in enumerate(all_sizes):
-                    with size_cols[idx + 2] if idx + 2 < len(size_cols) else size_cols[-1]:
+                    with size_cols[idx] if idx < len(size_cols) else size_cols[-1]:
                         if st.checkbox(size, value=(size in selected_sizes), key=f"sz_{size}"):
                             new_selected.append(size)
 
                 if new_selected != selected_sizes:
                     st.session_state.selected_sizes = new_selected
                     st.rerun()
-
-                st.markdown(f"**선택된 사이즈:** {', '.join(st.session_state.selected_sizes) if st.session_state.selected_sizes else '없음'}")
 
             # 중첩 시각화
             with st.expander("🔍 사이즈 중첩 비교", expanded=True):
@@ -2773,7 +2843,7 @@ if uploaded_file is not None:
         # 2. 원단명 변경 (선택 패턴의 모든 사이즈에 적용)
         with tool_col2:
             f1, f2 = st.columns([3, 1])
-            new_fabric = f1.text_input("원단명", placeholder="예: 안감", label_visibility="collapsed")
+            new_fabric = f1.text_input("원단명", value="안감", label_visibility="collapsed")
             if f2.button("원단적용", width='stretch'):
                 sel_indices = [i for i in base_indices_set if st.session_state.get(f"chk_{i}")]
                 if sel_indices and new_fabric:
@@ -3014,13 +3084,13 @@ if uploaded_file is not None:
         with col2:
             st.markdown("#### 📊 요척 결과")
 
-            # 헤더 라벨
+            # 헤더 라벨 (가운데 정렬)
             h1, h2, h_u, h3, h4 = st.columns([1.4, 0.9, 0.9, 0.9, 1.4])
-            h1.caption("원단/사이즈")
-            h2.caption("폭(W)")
-            h_u.caption("단위")
-            h3.caption("로스(%)")
-            h4.caption("필요요척(YD)")
+            h1.markdown("<div style='text-align: center; color: gray; font-size: 0.85rem;'>원단/사이즈</div>", unsafe_allow_html=True)
+            h2.markdown("<div style='text-align: center; color: gray; font-size: 0.85rem;'>폭(W)</div>", unsafe_allow_html=True)
+            h_u.markdown("<div style='text-align: center; color: gray; font-size: 0.85rem;'>단위</div>", unsafe_allow_html=True)
+            h3.markdown("<div style='text-align: center; color: gray; font-size: 0.85rem;'>로스(%)</div>", unsafe_allow_html=True)
+            h4.markdown("<div style='text-align: center; color: gray; font-size: 0.85rem;'>필요요척(YD)</div>", unsafe_allow_html=True)
 
             # 데이터 재계산 (필터링된 데이터 사용)
             filtered_indices = st.session_state.get('filtered_indices', list(range(len(st.session_state.df))))
@@ -3289,14 +3359,6 @@ if uploaded_file is not None:
         fabric_buffers = {}
 
         with left_col:
-            # 공통 설정 (기본 패턴 버퍼 - 원단별 미설정 시 사용)
-            nest_buffer = st.number_input(
-                "기본 패턴 버퍼 (mm)",
-                min_value=0, max_value=50, value=0,
-                help="패턴 둘레로 확장되는 여유 공간 (블로킹)",
-                key="nest_buffer"
-            )
-
             # 180도 회전 허용
             nest_rotation = st.checkbox(
                 "180도 회전 허용",
@@ -3308,7 +3370,7 @@ if uploaded_file is not None:
             # 좌우 마주 보기 (좌우 미러링)
             nest_mirror = st.checkbox(
                 "좌우 마주 보기",
-                value=False,
+                value=True,
                 help="수량 2개 이상 패턴을 좌우 뒤집어서 마주보게 배치",
                 key="nest_mirror"
             )
@@ -3333,16 +3395,16 @@ if uploaded_file is not None:
 
         with right_col:
 
-            # 원단별 설정 헤더
+            # 원단별 설정 헤더 (가운데 정렬)
             hcol1, hcol2, hcol3, hcol4 = st.columns([2, 1, 1, 1])
             with hcol1:
-                st.markdown("**원단**")
+                st.markdown("<div style='text-align: center;'><b>원단</b></div>", unsafe_allow_html=True)
             with hcol2:
-                st.markdown("**효율%**")
+                st.markdown("<div style='text-align: center;'><b>효율%</b></div>", unsafe_allow_html=True)
             with hcol3:
-                st.markdown("**버퍼mm**")
+                st.markdown("<div style='text-align: center;'><b>버퍼mm</b></div>", unsafe_allow_html=True)
             with hcol4:
-                st.markdown("**벌수**")
+                st.markdown("<div style='text-align: center;'><b>벌수</b></div>", unsafe_allow_html=True)
 
             # 원단별 설정 입력
             for i, fabric in enumerate(fabric_list):
@@ -3358,7 +3420,7 @@ if uploaded_file is not None:
 
                 col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
                 with col1:
-                    st.text(f"{fabric}: {width_cm:.1f}cm")
+                    st.markdown(f"<div style='text-align: center;'>{fabric}: {width_cm:.1f}cm</div>", unsafe_allow_html=True)
                 with col2:
                     target_efficiencies[fabric] = st.number_input(
                         "효율%",
@@ -3367,10 +3429,10 @@ if uploaded_file is not None:
                         label_visibility="collapsed"
                     )
                 with col3:
-                    # 원단별 패턴 버퍼 (기본값: 공통 설정값 사용)
+                    # 원단별 패턴 버퍼
                     fabric_buffers[fabric] = st.number_input(
                         "버퍼",
-                        min_value=0, max_value=50, value=nest_buffer,
+                        min_value=0, max_value=50, value=0,
                         key=f"fabric_buffer_{i}",
                         label_visibility="collapsed",
                         help=f"{fabric} 원단의 패턴 버퍼 (둘레 확장)"
@@ -3461,7 +3523,7 @@ if uploaded_file is not None:
 
                                 # 패턴ID: df인덱스(고유) + 이름(표시용) + 사이즈
                                 # df인덱스는 정렬 후에도 유지되는 고유 식별자
-                                pattern_name = str(row['구분'])[:8] if row['구분'] else ""  # 표시용 이름
+                                pattern_name = str(row['구분'])[-10:] if row['구분'] else ""  # 표시용 이름 (뒤에서 10글자)
                                 pattern_id = f"{idx}:{pattern_name}\n{size_name[:4]}" if size_name else f"{idx}:{pattern_name}"
                                 pattern_data.append({
                                     'coords_cm': coords_cm,
@@ -3488,8 +3550,8 @@ if uploaded_file is not None:
                             st.warning(f"⚠️ 수량 불일치: 예상 {expected_qty}개, 실제 {total_qty_debug}개")
 
                         width_cm = fabric_widths[fabric]
-                        # 원단별 패턴 버퍼 (미설정 시 기본값 사용)
-                        fabric_buffer = fabric_buffers.get(fabric, nest_buffer)
+                        # 원단별 패턴 버퍼
+                        fabric_buffer = fabric_buffers.get(fabric, 0)
 
                         if use_sparrow and SPARROW_AVAILABLE:
                             # Sparrow 네스팅 (버퍼로 패턴 둘레 확장)
@@ -3581,8 +3643,12 @@ if uploaded_file is not None:
                                     m1.metric("패턴수", f"{result['placed_count']}/{result['total_count']}")
                                     m2.metric("원단폭", f"{result['width_cm']:.0f} cm")
                                     m3.metric("마카길이", f"{result['used_length_cm']:.1f} cm")
-                                    # 요척 = 마카길이(YD) / 벌수
-                                    yield_per_set = result['used_length_yd'] / marker_qty
+                                    # 요척 = 마카길이(YD) / 벌수 (사이즈별 벌수 합계 사용)
+                                    if result_has_multi and result_size_qty:
+                                        total_marker_qty = sum(result_size_qty.get(s, 1) for s in selected_sizes if result_size_qty.get(s, 1) > 0)
+                                    else:
+                                        total_marker_qty = marker_qty
+                                    yield_per_set = result['used_length_yd'] / total_marker_qty if total_marker_qty > 0 else result['used_length_yd']
                                     m4.metric("요척", f"{yield_per_set:.2f} YD")
                                     m5.metric("효율", f"{result['efficiency']}%")
 
@@ -3690,8 +3756,8 @@ if uploaded_file is not None:
                                                             })
 
                                                     width_cm = result['width_cm']
-                                                    # 원단별 패턴 버퍼 (저장된 값 또는 기본값)
-                                                    fabric_buffer = result.get('buffer', st.session_state.get('nest_buffer', 0))
+                                                    # 원단별 패턴 버퍼 (저장된 값 또는 기본값 0)
+                                                    fabric_buffer = result.get('buffer', 0)
 
                                                     # Sparrow 네스팅 실행 (버퍼로 패턴 둘레 확장)
                                                     if SPARROW_AVAILABLE:
@@ -3801,8 +3867,8 @@ if uploaded_file is not None:
                                             'grainline_cm': grainline_cm
                                         })
 
-                                # 원단별 패턴 버퍼 (저장된 값 또는 기본값)
-                                fabric_buffer = result.get('buffer', st.session_state.get('nest_buffer', 0))
+                                # 원단별 패턴 버퍼 (저장된 값 또는 기본값 0)
+                                fabric_buffer = result.get('buffer', 0)
 
                                 # 벌수 2~5까지 시도하여 최적 효율 찾기
                                 for try_qty in range(2, 6):
@@ -3878,7 +3944,17 @@ if uploaded_file is not None:
 
             # 네스팅 결과 엑셀 내보내기
             st.markdown("---")
-            excel_data = export_nesting_to_excel(results, st.session_state.get('nesting_timestamp', ''))
+            # 제목 정보 수집
+            excel_style_no = st.session_state.get('style_no') or uploaded_file.name.replace('.dxf', '').replace('.DXF', '')
+            excel_selected_sizes = st.session_state.get('selected_sizes', [])
+            excel_base_size = st.session_state.get('detected_base_size') or st.session_state.get('base_size')
+            excel_data = export_nesting_to_excel(
+                results,
+                st.session_state.get('nesting_timestamp', ''),
+                style_no=excel_style_no,
+                selected_sizes=excel_selected_sizes,
+                base_size=excel_base_size
+            )
             if excel_data:
                 # DXF 파일 이름에서 확장자 제거
                 dxf_base_name = uploaded_file.name.replace('.dxf', '').replace('.DXF', '')
