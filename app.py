@@ -2983,13 +2983,17 @@ if uploaded_file is not None:
                     expanded_indices = set()
                     for idx in sel_indices:
                         pattern_group = patterns[idx][4]
+                        print(f"[DEBUG] 수량변경: idx={idx}, pattern_group='{pattern_group}', in_group_map={pattern_group in group_to_indices if pattern_group else False}")
                         if pattern_group and pattern_group in group_to_indices:
                             for size_name, size_idx in group_to_indices[pattern_group].items():
                                 if not selected_sizes or size_name in selected_sizes:
                                     expanded_indices.add(size_idx)
+                                    print(f"[DEBUG]   → 확장: size={size_name}, idx={size_idx}")
                         else:
                             expanded_indices.add(idx)
+                            print(f"[DEBUG]   → pattern_group 없음, 단일 idx만 추가")
 
+                    print(f"[DEBUG] 수량변경 대상 인덱스: {sorted(expanded_indices)}")
                     for idx in expanded_indices:
                         st.session_state.df.at[idx, "수량"] = new_count
                     st.rerun()
