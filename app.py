@@ -2753,16 +2753,24 @@ if uploaded_file is not None:
         # 기준사이즈: DXF에서 추출한 값 또는 가운데 사이즈
         base_size = st.session_state.get('base_size', selected_sizes[0] if selected_sizes else None)
 
+        # group_to_indices: 선택된 사이즈만 포함 (핵심 수정)
+        # 이전: 모든 사이즈 포함 → 수량변경/복사 시 선택되지 않은 사이즈도 영향
+        # 수정: selected_sizes에 포함된 사이즈만 매핑
         group_to_indices = {}
         base_indices_set = set()
         for idx, p_data in enumerate(patterns):
             size_name = p_data[3]
             pattern_group = p_data[4]
+
+            # 선택된 사이즈만 group_to_indices에 포함
             if pattern_group:
-                if pattern_group not in group_to_indices:
-                    group_to_indices[pattern_group] = {}
-                group_to_indices[pattern_group][size_name] = idx
-            # 기본 사이즈 인덱스
+                # 사이즈가 없거나, 선택된 사이즈에 포함된 경우만 추가
+                if not all_sizes or not size_name or size_name in selected_sizes:
+                    if pattern_group not in group_to_indices:
+                        group_to_indices[pattern_group] = {}
+                    group_to_indices[pattern_group][size_name] = idx
+
+            # 기본 사이즈 인덱스 (썸네일 표시용)
             if not all_sizes or size_name == base_size or not size_name:
                 base_indices_set.add(idx)
 
@@ -2780,18 +2788,16 @@ if uploaded_file is not None:
                 if sel_indices:
                     new_patterns = list(st.session_state.patterns)
                     new_df = st.session_state.df.copy()
-                    selected_sizes = st.session_state.get('selected_sizes', [])
-                    all_sizes = st.session_state.get('all_sizes', [])
 
-                    # 선택한 패턴 + 모든 선택된 사이즈 확장하여 복사
+                    # 선택한 패턴 + 선택된 사이즈 확장하여 복사
+                    # group_to_indices는 이미 selected_sizes만 포함
                     expanded_indices = set()
                     for idx in sel_indices:
                         pattern_group = patterns[idx][4]
                         if pattern_group and pattern_group in group_to_indices:
-                            # 선택된 사이즈의 동일 패턴 모두 추가
+                            # group_to_indices에 있는 모든 사이즈 추가 (이미 선택된 사이즈만 포함됨)
                             for size_name, size_idx in group_to_indices[pattern_group].items():
-                                if not selected_sizes or size_name in selected_sizes:
-                                    expanded_indices.add(size_idx)
+                                expanded_indices.add(size_idx)
                         else:
                             expanded_indices.add(idx)
 
@@ -2815,18 +2821,16 @@ if uploaded_file is not None:
             if c4.button("🗑삭제", width='stretch', help="선택 패턴 삭제"):
                 sel_indices = [i for i in base_indices_set if st.session_state.get(f"chk_{i}")]
                 if sel_indices:
-                    selected_sizes = st.session_state.get('selected_sizes', [])
-                    all_sizes = st.session_state.get('all_sizes', [])
                     new_df = st.session_state.df
 
-                    # 선택한 패턴 + 모든 선택된 사이즈 확장하여 삭제
+                    # 선택한 패턴 + 선택된 사이즈 확장하여 삭제
+                    # group_to_indices는 이미 selected_sizes만 포함
                     delete_indices = set()
                     for idx in sel_indices:
                         pattern_group = patterns[idx][4]
                         if pattern_group and pattern_group in group_to_indices:
                             for size_name, size_idx in group_to_indices[pattern_group].items():
-                                if not selected_sizes or size_name in selected_sizes:
-                                    delete_indices.add(size_idx)
+                                delete_indices.add(size_idx)
                         else:
                             delete_indices.add(idx)
 
@@ -2848,17 +2852,15 @@ if uploaded_file is not None:
                 sel_indices = [i for i in base_indices_set if st.session_state.get(f"chk_{i}")]
                 if sel_indices and new_fabric:
                     new_color = get_fabric_color_hex(new_fabric)
-                    selected_sizes = st.session_state.get('selected_sizes', [])
-                    all_sizes = st.session_state.get('all_sizes', [])
 
-                    # 선택한 패턴 + 모든 선택된 사이즈 확장하여 원단 변경
+                    # 선택한 패턴 + 선택된 사이즈 확장하여 원단 변경
+                    # group_to_indices는 이미 selected_sizes만 포함
                     expanded_indices = set()
                     for idx in sel_indices:
                         pattern_group = patterns[idx][4]
                         if pattern_group and pattern_group in group_to_indices:
                             for size_name, size_idx in group_to_indices[pattern_group].items():
-                                if not selected_sizes or size_name in selected_sizes:
-                                    expanded_indices.add(size_idx)
+                                expanded_indices.add(size_idx)
                         else:
                             expanded_indices.add(idx)
 
@@ -2875,17 +2877,14 @@ if uploaded_file is not None:
             if n2.button("수량적용", width='stretch'):
                 sel_indices = [i for i in base_indices_set if st.session_state.get(f"chk_{i}")]
                 if sel_indices:
-                    selected_sizes = st.session_state.get('selected_sizes', [])
-                    all_sizes = st.session_state.get('all_sizes', [])
-
-                    # 선택한 패턴 + 모든 선택된 사이즈 확장하여 수량 변경
+                    # 선택한 패턴 + 선택된 사이즈 확장하여 수량 변경
+                    # group_to_indices는 이미 selected_sizes만 포함
                     expanded_indices = set()
                     for idx in sel_indices:
                         pattern_group = patterns[idx][4]
                         if pattern_group and pattern_group in group_to_indices:
                             for size_name, size_idx in group_to_indices[pattern_group].items():
-                                if not selected_sizes or size_name in selected_sizes:
-                                    expanded_indices.add(size_idx)
+                                expanded_indices.add(size_idx)
                         else:
                             expanded_indices.add(idx)
 
@@ -2971,14 +2970,17 @@ if uploaded_file is not None:
 
             # 패턴 그룹별 인덱스 매핑 (동일 패턴의 다른 사이즈 연결)
             # pattern_group이 같으면 동일 패턴의 다른 사이즈
+            # 선택된 사이즈만 포함 (수량 변경 시 네스팅과 동기화)
             group_to_indices = {}  # {pattern_group: {size: idx, ...}}
             for idx, p_data in enumerate(patterns):
                 size_name = p_data[3]
                 pattern_group = p_data[4]
                 if pattern_group:
-                    if pattern_group not in group_to_indices:
-                        group_to_indices[pattern_group] = {}
-                    group_to_indices[pattern_group][size_name] = idx
+                    # 선택된 사이즈만 포함
+                    if not all_sizes or not size_name or size_name in selected_sizes:
+                        if pattern_group not in group_to_indices:
+                            group_to_indices[pattern_group] = {}
+                        group_to_indices[pattern_group][size_name] = idx
 
             # 기본 사이즈 인덱스만 추출 (편집용)
             base_indices = []
@@ -3060,18 +3062,17 @@ if uploaded_file is not None:
                             st.session_state.df.at[base_idx, "형상"] = poly_to_base64(patterns[base_idx][0], get_fabric_color_hex(new_fabric))
 
                         # 동일 패턴의 다른 사이즈에도 적용 (pattern_group으로 매칭)
+                        # group_to_indices는 이미 selected_sizes만 포함
                         base_pattern_group = patterns[base_idx][4] if base_idx < len(patterns) else None
                         if base_pattern_group and base_pattern_group in group_to_indices:
                             for size_name, j in group_to_indices[base_pattern_group].items():
                                 if j == base_idx:
                                     continue
-                                # 선택된 사이즈인 경우만 적용
-                                if not all_sizes or not size_name or size_name in selected_sizes:
-                                    st.session_state.df.at[j, "원단"] = new_fabric
-                                    st.session_state.df.at[j, "수량"] = new_qty
-                                    st.session_state.df.at[j, "구분"] = new_cat
-                                    if old_fabric != new_fabric and j < len(patterns):
-                                        st.session_state.df.at[j, "형상"] = poly_to_base64(patterns[j][0], get_fabric_color_hex(new_fabric))
+                                st.session_state.df.at[j, "원단"] = new_fabric
+                                st.session_state.df.at[j, "수량"] = new_qty
+                                st.session_state.df.at[j, "구분"] = new_cat
+                                if old_fabric != new_fabric and j < len(patterns):
+                                    st.session_state.df.at[j, "형상"] = poly_to_base64(patterns[j][0], get_fabric_color_hex(new_fabric))
 
                         # 구분 변경 시 네스팅 결과의 패턴 이름도 업데이트
                         if old_cat != new_cat:
