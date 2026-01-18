@@ -684,8 +684,15 @@ def export_nesting_to_excel(nesting_results, timestamp, style_no=None, selected_
 
     for fabric, result in nesting_results.items():
         if result.get('success'):
-            marker_qty = result.get('marker_quantity', 1)
-            yield_per_set = result.get('used_length_yd', 0) / marker_qty
+            # 벌수 계산: 사이즈별 벌수 합계 또는 단일 벌수
+            size_quantities = result.get('size_quantities', {})
+            has_multiple_sizes = result.get('has_multiple_sizes', False)
+            if has_multiple_sizes and size_quantities and selected_sizes:
+                marker_qty = sum(size_quantities.get(s, 1) for s in selected_sizes if size_quantities.get(s, 1) > 0)
+            else:
+                marker_qty = result.get('marker_quantity', 1)
+
+            yield_per_set = result.get('used_length_yd', 0) / marker_qty if marker_qty > 0 else result.get('used_length_yd', 0)
             row_data = [
                 fabric,
                 marker_qty,
@@ -2373,6 +2380,28 @@ if uploaded_file is not None:
             sizes_tuple = tuple(st.session_state.selected_load_sizes) if st.session_state.selected_load_sizes else None
             patterns, detected_base_size = process_dxf(tmp_path, sizes_tuple)
             style_no = extract_style_no(tmp_path)
+
+            # 기준사이즈가 선택되지 않은 경우, 기준사이즈 패턴만 별도로 로드하여 수량/원단 정보 수집
+            base_size_quantities_cache = {}  # {pattern_group: quantity}
+            base_size_fabrics_cache = {}  # {pattern_group: fabric_name}
+
+            if detected_base_size and (sizes_tuple is None or detected_base_size not in sizes_tuple):
+                # 기준사이즈가 선택되지 않았으므로 별도 로드
+                base_patterns, _ = process_dxf(tmp_path, (detected_base_size,))
+                for p_data in base_patterns:
+                    pattern_group = p_data[4]
+                    fabric_name = p_data[2]
+                    dxf_quantity = p_data[6] if len(p_data) > 6 else 0
+                    if pattern_group:
+                        if dxf_quantity > 0:
+                            base_size_quantities_cache[pattern_group] = dxf_quantity
+                        if fabric_name:
+                            base_size_fabrics_cache[pattern_group] = fabric_name
+                print(f"[DEBUG] 기준사이즈 별도 로드: {detected_base_size}, qty={base_size_quantities_cache}")
+
+            st.session_state.base_size_quantities_cache = base_size_quantities_cache
+            st.session_state.base_size_fabrics_cache = base_size_fabrics_cache
+
         os.remove(tmp_path)  # 임시 파일 삭제
         st.session_state.patterns = patterns
         st.session_state.detected_base_size = detected_base_size  # DXF에서 추출한 기준사이즈
@@ -2479,6 +2508,48 @@ if uploaded_file is not None:
         pattern_number_map = {}  # (pattern_name, fabric) -> 번호
         current_number = 0
 
+        # 기준사이즈 수량/원단 수집 (pattern_group별)
+        # 기준사이즈에만 QUANTITY/CATEGORY가 있는 DXF 파일 지원
+        # 핵심 규칙: 기준사이즈에 수량이 있으면 모든 사이즈가 따르고, 없으면 모든 사이즈가 추론 사용
+        base_size = st.session_state.get('base_size') or st.session_state.get('detected_base_size')
+        base_size_quantities = {}  # {pattern_group: quantity}
+        base_size_fabrics = {}  # {pattern_group: fabric_name}
+        base_size_has_any_quantity = False  # 기준사이즈에 수량이 하나라도 있는지
+        base_size_has_any_fabric = False  # 기준사이즈에 원단이 하나라도 있는지
+
+        # 1. 먼저 캐시된 기준사이즈 정보 로드 (기준사이즈가 선택되지 않은 경우를 위해)
+        cached_quantities = st.session_state.get('base_size_quantities_cache', {})
+        cached_fabrics = st.session_state.get('base_size_fabrics_cache', {})
+        if cached_quantities:
+            base_size_quantities.update(cached_quantities)
+            base_size_has_any_quantity = True
+        if cached_fabrics:
+            base_size_fabrics.update(cached_fabrics)
+            base_size_has_any_fabric = True
+
+        # 2. 선택된 패턴에서 기준사이즈 정보 수집 (캐시 덮어쓰기)
+        if base_size:
+            for p_data in patterns:
+                size_name = p_data[3]
+                pattern_group = p_data[4]
+                fabric_name = p_data[2]
+                dxf_quantity = p_data[6] if len(p_data) > 6 else 0
+
+                # 기준사이즈이고 pattern_group이 있는 경우 저장
+                if size_name == base_size and pattern_group:
+                    print(f"[DEBUG] 기준사이즈 패턴(선택됨): group={pattern_group}, qty={dxf_quantity}, fabric={fabric_name}")
+                    if dxf_quantity > 0:
+                        base_size_quantities[pattern_group] = dxf_quantity
+                        base_size_has_any_quantity = True
+                    if fabric_name:
+                        base_size_fabrics[pattern_group] = fabric_name
+                        base_size_has_any_fabric = True
+
+        # 디버그: 기준사이즈 정보 출력
+        print(f"[DEBUG] base_size={base_size}, has_qty={base_size_has_any_quantity}, has_fabric={base_size_has_any_fabric}")
+        print(f"[DEBUG] base_size_quantities={base_size_quantities}")
+        print(f"[DEBUG] base_size_fabrics={base_size_fabrics}")
+
         for i, p_data in enumerate(patterns):
             # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity)
             poly = p_data[0]
@@ -2491,21 +2562,51 @@ if uploaded_file is not None:
 
             minx, miny, maxx, maxy = poly.bounds
             w, h = (maxx - minx) / 10, (maxy - miny) / 10
-            extracted_fabric = fabric_name if fabric_name else "겉감"
 
-            # 수량/구분 결정 우선순위:
-            # 1순위: DXF 원본 정보 (QUANTITY, ANNOTATION 부위명)
-            # 2순위: 패턴 DB 예측
-            # 3순위: 형상 기반 추론
+            # 원단 결정: 기준사이즈 기준으로 전체 일관성 유지
+            # 핵심 규칙:
+            # - 기준사이즈에 원단이 있으면 → 모든 사이즈가 기준사이즈 원단 사용
+            # - 기준사이즈에 원단이 없으면 → 모든 사이즈가 기본값 "겉감" 사용
 
-            # 1순위: DXF 원본 수량 (QUANTITY 필드)
-            if dxf_quantity > 0:
-                count = dxf_quantity
-                default_desc = pattern_name if pattern_name else "확인"
-                db_used = True  # 원본 사용 표시
+            if base_size_has_any_fabric:
+                # 기준사이즈에 원단이 있는 경우: 기준사이즈 원단만 사용
+                if pattern_group and pattern_group in base_size_fabrics:
+                    extracted_fabric = base_size_fabrics[pattern_group]
+                else:
+                    # pattern_group이 기준사이즈에 없는 경우: 기본값
+                    extracted_fabric = "겉감"
             else:
-                # 2순위: 패턴 DB 예측
-                db_used = False
+                # 기준사이즈에 원단이 없는 경우: 기본값 "겉감"
+                extracted_fabric = "겉감"
+
+            # 수량 결정: 기준사이즈 기준으로 전체 일관성 유지
+            # 핵심 규칙:
+            # - 기준사이즈에 수량이 있으면 → 모든 사이즈가 기준사이즈 수량 사용
+            # - 기준사이즈에 수량이 없으면 → 모든 사이즈가 추론 사용 (DXF QUANTITY 무시)
+
+            db_used = False
+
+            if base_size_has_any_quantity:
+                # 기준사이즈에 수량이 있는 경우: 기준사이즈 수량만 사용
+                if pattern_group and pattern_group in base_size_quantities:
+                    count = base_size_quantities[pattern_group]
+                    default_desc = pattern_name if pattern_name else "확인"
+                    db_used = True
+                    print(f"[DEBUG] 수량결정: size={size_name}, group={pattern_group} → 기준사이즈 수량 {count} 사용")
+                else:
+                    # pattern_group이 기준사이즈에 없는 경우 (추가 패턴 등)
+                    print(f"[DEBUG] 수량결정: size={size_name}, group={pattern_group} → 기준사이즈에 없음, 추론 사용")
+                    # 패턴 DB 예측 또는 형상 추론 사용
+                    if pattern_db and len(pattern_db.records) > 0:
+                        pred_qty, pred_cat, confidence, refs = pattern_db.predict_quantity(poly)
+                        if confidence >= 0.5:
+                            count = pred_qty
+                            default_desc = pred_cat
+                            db_used = True
+
+            # 기준사이즈에 수량이 없거나, 위에서 수량을 결정하지 못한 경우: 추론 사용
+            if not db_used:
+                # 패턴 DB 예측 시도
                 if pattern_db and len(pattern_db.records) > 0:
                     pred_qty, pred_cat, confidence, refs = pattern_db.predict_quantity(poly)
                     if confidence >= 0.5:
@@ -2513,7 +2614,7 @@ if uploaded_file is not None:
                         default_desc = pred_cat
                         db_used = True
 
-                # 3순위: 형상 기반 추론
+                # 형상 기반 추론
                 if not db_used:
                     is_symmetric, sym_reason = check_symmetry(poly)
 
@@ -2871,7 +2972,7 @@ if uploaded_file is not None:
         # 3. 수량 변경 (선택 패턴의 모든 사이즈에 적용)
         with tool_col3:
             n1, n2 = st.columns([3, 1])
-            new_count = n1.number_input("수량", min_value=0, label_visibility="collapsed")
+            new_count = n1.number_input("수량", min_value=0, value=2, label_visibility="collapsed")
             if n2.button("수량적용", width='stretch'):
                 sel_indices = [i for i in base_indices_set if st.session_state.get(f"chk_{i}")]
                 if sel_indices:
