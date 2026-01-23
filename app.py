@@ -23,6 +23,14 @@ import os
 import io
 import base64
 
+# 상수 임포트
+from constants import (
+    FABRIC_MAP, FABRIC_COLORS, DEFAULT_FABRIC_COLOR, DEFAULT_FABRIC_NAME,
+    SIZE_ORDER, SIZE_ORDER_LIST, MIN_PATTERN_AREA, BASE_SIZE_PREFIXES,
+    GRAINLINE_KEYWORDS, GRAINLINE_LAYER_NUMBERS, UNIT_SCALE_INCH_TO_MM,
+    get_fabric_color, size_sort_key, get_fabric_name
+)
+
 # 네스팅 엔진 임포트
 from nesting_engine import NestingEngine, create_nesting_visualization
 
@@ -811,16 +819,7 @@ def export_nesting_to_excel(nesting_results, timestamp, style_no=None, selected_
 
 def get_fabric_color_hex(fabric_name):
     """원단 이름에 따른 색상 코드를 반환합니다."""
-    color_map = {
-        "겉감": "#4c78a8",  # Blue (Tableau)
-        "안감": "#e45756",  # Red (Tableau)
-        "심지": "#edc948",  # Yellow (Tableau) - User Request
-        "배색": "#f58518",  # Orange (Tableau)
-        "주머니": "#54a24b" # Green (Tableau)
-    }
-    for key, color in color_map.items():
-        if key in fabric_name: return color
-    return "#dddddd" # 기본값 (회색)
+    return get_fabric_color(fabric_name)
 
 def extract_lines(entity, lines_list):
     """DXF 엔티티에서 선분 정보를 재귀적으로 추출합니다."""
@@ -933,18 +932,20 @@ def get_cached_thumbnail(idx, poly, fabric_name, zoom_span, grainline_info=None)
     return st.session_state.thumbnail_cache[cache_key]
 
 
-def create_overlay_visualization(patterns_group, selected_sizes, all_sizes, global_max_dim=None):
+def create_overlay_visualization(patterns_group, selected_sizes, all_sizes, global_max_dim=None, base_size=None):
     """
     동일 패턴 그룹의 여러 사이즈를 중첩하여 시각화
     - 바탕색 없이 외곽선만 표시
     - 사이즈별 다른 색상 외곽선
     - 중심 정렬로 크기 비교
+    - 기준사이즈의 내부선(스티치선, 시접선) 표시
 
     Args:
-        patterns_group: [(poly, pattern_name, fabric_name, size_name, pattern_group), ...] 동일 그룹
+        patterns_group: [(poly, pattern_name, fabric_name, size_name, pattern_group, ..., interior_lines), ...] 동일 그룹
         selected_sizes: 선택된 사이즈 목록
         all_sizes: 전체 사이즈 목록
         global_max_dim: 전역 최대 크기 (모든 패턴에 동일 비율 적용)
+        base_size: 기준사이즈 (내부선 표시용)
 
     Returns:
         matplotlib figure
@@ -1003,6 +1004,17 @@ def create_overlay_visualization(patterns_group, selected_sizes, all_sizes, glob
             ax.plot(x, y, color=color, linewidth=1.0, linestyle='-', alpha=1.0)
         else:
             ax.plot(x, y, color=color, linewidth=0.1, linestyle='--', alpha=0.4)
+
+        # 기준사이즈인 경우 내부선(스티치선, 시접선) 표시
+        if base_size and size_name == base_size and is_selected:
+            # 내부선은 튜플의 9번째 요소 (index 8)
+            if len(p_data) > 8 and p_data[8]:
+                interior_lines = p_data[8]
+                for line_coords in interior_lines:
+                    if len(line_coords) >= 2:
+                        line_x = [c[0] for c in line_coords]
+                        line_y = [c[1] for c in line_coords]
+                        ax.plot(line_x, line_y, color=color, linewidth=0.5, linestyle='-', alpha=0.7)
 
         # 범례용 핸들 (사이즈당 하나만)
         if size_name not in drawn_sizes:
@@ -1289,9 +1301,6 @@ def detect_grainline(block, return_coords=False, polygon=None):
     """
     import math
 
-    # 그레인라인 레이어 키워드 (숫자 7도 포함 - 일부 CAD 시스템에서 사용)
-    grainline_keywords = ['GRAIN', 'GL', 'GRAINLINE', '결', '결방향', 'STRAIGHT']
-    grainline_layer_numbers = ['7']  # 숫자 레이어도 그레인라인일 수 있음
     candidate_lines = []
 
     for entity in block:
@@ -1299,8 +1308,8 @@ def detect_grainline(block, return_coords=False, polygon=None):
 
         # 레이어명으로 그레인라인 감지 (키워드 또는 숫자 레이어)
         is_grainline_layer = (
-            any(kw in layer_name for kw in grainline_keywords) or
-            layer_name in grainline_layer_numbers
+            any(kw in layer_name for kw in GRAINLINE_KEYWORDS) or
+            layer_name in GRAINLINE_LAYER_NUMBERS
         )
 
         if entity.dxftype() == 'LINE':
@@ -1476,7 +1485,6 @@ def detect_grainline_for_polygon(msp, poly):
     import math
     from shapely.geometry import Point, LineString
 
-    grainline_keywords = ['GRAIN', 'GL', 'GRAINLINE', '결', '결방향', 'STRAIGHT']
     candidate_lines = []
 
     # 폴리곤 바운딩박스 확장 (근처 선 검색용)
@@ -1487,7 +1495,7 @@ def detect_grainline_for_polygon(msp, poly):
 
     for entity in msp:
         layer_name = entity.dxf.layer.upper() if hasattr(entity.dxf, 'layer') else ''
-        is_grainline_layer = any(kw in layer_name for kw in grainline_keywords)
+        is_grainline_layer = any(kw in layer_name for kw in GRAINLINE_KEYWORDS)
 
         if entity.dxftype() == 'LINE':
             start = entity.dxf.start
@@ -1599,17 +1607,12 @@ def scan_dxf_sizes(file_path):
 
         msp = doc.modelspace()
 
-        # 기준사이즈 prefix 목록
-        base_prefixes = ['BASE_SIZE:', 'BASESIZE:', 'BASE SIZE:', 'BASE:',
-                        'REF_SIZE:', 'REFSIZE:', 'REF SIZE:',
-                        'SAMPLE_SIZE:', 'SAMPLESIZE:', 'SAMPLE SIZE:']
-
         # 방법 0: modelspace 직접 TEXT에서 기준사이즈 추출
         for entity in msp:
             if entity.dxftype() == 'TEXT' and not base_size:
                 text = entity.dxf.text
                 text_upper = text.upper().strip()
-                for prefix in base_prefixes:
+                for prefix in BASE_SIZE_PREFIXES:
                     if text_upper.startswith(prefix):
                         base_val = text.split(':', 1)[1].strip().upper()
                         if base_val:
@@ -1640,7 +1643,7 @@ def scan_dxf_sizes(file_path):
                                     sizes.add(size_val.upper())
                             # 기준사이즈 추출 (여러 패턴 지원)
                             elif not base_size:
-                                for prefix in base_prefixes:
+                                for prefix in BASE_SIZE_PREFIXES:
                                     if text_upper.startswith(prefix):
                                         base_val = text.split(':', 1)[1].strip().upper()
                                         if base_val:
@@ -1652,17 +1655,7 @@ def scan_dxf_sizes(file_path):
         st.error(f"사이즈 스캔 오류: {e}")
         return [], None
 
-    # 사이즈 정렬 (숫자 사이즈 우선, 문자 사이즈 후순)
-    def size_sort_key(s):
-        # 숫자 사이즈 (85, 90, 95, 100, 105, 110, 115, 120...)
-        if s.isdigit():
-            return (0, int(s))
-        # 문자 사이즈 순서 정의
-        size_order = ['XS', 'S', 'M', 'L', 'XL', 'XXL', '2XL', '3XL', '0X', '1X', '2X', '3X']
-        if s in size_order:
-            return (1, size_order.index(s))
-        return (2, s)
-
+    # 사이즈 정렬 (constants.size_sort_key 사용)
     sorted_sizes = sorted(list(sizes), key=size_sort_key)
 
     # 기준사이즈가 없으면 중간 사이즈를 기준으로 설정
@@ -1684,7 +1677,6 @@ def process_dxf(file_path, selected_sizes=None):
         selected_sizes: 선택된 사이즈 목록 (None이면 전체 로딩)
     """
     import re
-    print(f"[DEBUG] process_dxf 시작: {file_path}, selected_sizes={selected_sizes}")
 
     try:
         # 특수문자 전처리 (블록명에 <&> 등이 있으면 치환)
@@ -1710,37 +1702,17 @@ def process_dxf(file_path, selected_sizes=None):
                 if text.startswith('UNITS:'):
                     unit_value = text.split(':', 1)[1].strip()
                     if unit_value == 'ENGLISH':
-                        unit_scale = 25.4  # 인치 → mm
-                        print(f"[DEBUG] 단위 감지: ENGLISH (인치), 스케일 {unit_scale}배 적용 (인치→mm)")
+                        unit_scale = UNIT_SCALE_INCH_TO_MM
                     elif unit_value == 'METRIC':
                         unit_scale = 1.0  # 이미 mm
-                        print(f"[DEBUG] 단위 감지: METRIC, 스케일 없음")
                     break
 
-        # 원단명 매핑 (CATEGORY 또는 ANNOTATION 값 → 표준 원단명)
-        fabric_map = {
-            'LINING': '안감',
-            'SHELL': '겉감',
-            'INTERLINING': '심지',
-            'MESH': '메쉬',
-            '겉감': '겉감',
-            '안감': '안감',
-            '심지': '심지',
-            '메쉬': '메쉬',
-            '니트': '니트',
-        }
-
         # 모델스페이스에서 기준사이즈 먼저 검색 (SAMPLE SIZE, BASE SIZE 등)
-        base_size_prefixes = [
-            'BASE_SIZE:', 'BASESIZE:', 'BASE SIZE:',
-            'REF_SIZE:', 'REFSIZE:', 'REF SIZE:',
-            'SAMPLE_SIZE:', 'SAMPLESIZE:', 'SAMPLE SIZE:'
-        ]
         for entity in msp:
             if entity.dxftype() == 'TEXT':
                 text = entity.dxf.text
                 text_upper = text.upper().strip()
-                for prefix in base_size_prefixes:
+                for prefix in BASE_SIZE_PREFIXES:
                     if text_upper.startswith(prefix):
                         base_val = text.split(':', 1)[1].strip()
                         if base_val and not detected_base_size:
@@ -1757,7 +1729,6 @@ def process_dxf(file_path, selected_sizes=None):
                 block_name = entity.dxf.name
                 try:
                     block = doc.blocks.get(block_name)
-                    print(f"[DEBUG] 블록 처리 시작: {block_name}")
                     max_poly = None
                     max_area = 0
                     pattern_name = ""
@@ -1768,9 +1739,9 @@ def process_dxf(file_path, selected_sizes=None):
                     dxf_quantity = 0  # QUANTITY 필드 (원본 수량)
 
                     # 블록명에서 패턴그룹/사이즈 추출
-                    # 형식1: BLK_1_XS → 그룹:1, 사이즈:XS
+                    # 형식1: BLK_1_XS → 그룹:1, 사이즈:XS (AAMA)
                     # 형식2: 앞판-a_M → 그룹:앞판-a, 사이즈:M
-                    # 마지막 _를 기준으로 분리하여 사이즈 패턴 확인
+                    # 형식3: 1, 2, 3... → 그룹:블록명 (TIIP - 사이즈는 SIZE 필드에서)
                     if '_' in block_name:
                         base_name, potential_size = block_name.rsplit('_', 1)
                         # 사이즈 패턴: S, M, L, XS, XL, XXL, 2XL, 3XL, 0X, 1X, 00X, 85, 90 등
@@ -1782,6 +1753,10 @@ def process_dxf(file_path, selected_sizes=None):
                             block_parts = block_name.split('_')
                             if len(block_parts) >= 2 and block_parts[1].isdigit():
                                 pattern_group = block_parts[1]
+                    else:
+                        # TIIP 형식: 블록명이 숫자인 경우 (1, 2, 3...)
+                        # pattern_group은 나중에 piece_name으로 설정됨
+                        pass
 
                     # 블록 내 가장 큰 닫힌 POLYLINE 선택 + 텍스트 추출
                     for be in block:
@@ -1810,12 +1785,20 @@ def process_dxf(file_path, selected_sizes=None):
                         elif be.dxftype() == 'TEXT':
                             text = be.dxf.text
 
-                            # PIECE NAME 필드에서 패턴 번호/이름 추출 (대소문자 무시)
+                            # PIECE NAME / PIECE 필드에서 패턴 번호/이름 추출 (대소문자 무시)
                             text_upper = text.upper()
                             if text_upper.startswith('PIECE NAME:'):
                                 piece_val = text.split(':', 1)[1].strip()
                                 if piece_val:
                                     piece_name = piece_val
+                            # TIIP 형식: PIECE: (PIECE NAME: 없이)
+                            elif text_upper.startswith('PIECE:') and not text_upper.startswith('PIECE NAME:'):
+                                piece_val = text.split(':', 1)[1].strip()
+                                if piece_val:
+                                    piece_name = piece_val
+                                    # TIIP에서는 PIECE가 패턴명 역할
+                                    if not pattern_name:
+                                        pattern_name = piece_val
 
                             # QUANTITY 필드에서 원본 수량 추출 (대소문자 무시)
                             elif text_upper.startswith('QUANTITY:') or text_upper.startswith('QTY:'):
@@ -1834,13 +1817,26 @@ def process_dxf(file_path, selected_sizes=None):
                                 cat_val = text.split(':', 1)[1].strip()
                                 if cat_val:
                                     # 매핑된 원단명 찾기
-                                    for key, mapped in fabric_map.items():
+                                    for key, mapped in FABRIC_MAP.items():
                                         if key.upper() == cat_val.upper() or key == cat_val:
                                             fabric_name = mapped
                                             break
                                     # 매핑 안 되면 기본값 "겉감" 사용
                                     if not fabric_name:
                                         fabric_name = "겉감"
+
+                            # TIIP 형식: FABRIC 필드에서 원단명 추출
+                            elif text_upper.startswith('FABRIC:'):
+                                fab_val = text.split(':', 1)[1].strip()
+                                if fab_val:
+                                    # 매핑된 원단명 찾기
+                                    for key, mapped in FABRIC_MAP.items():
+                                        if key.upper() == fab_val.upper() or key == fab_val:
+                                            fabric_name = mapped
+                                            break
+                                    # 매핑 안 되면 원본값 사용 (빈 문자열이면 기본값)
+                                    if not fabric_name and fab_val:
+                                        fabric_name = fab_val
 
                             # ANNOTATION 필드 처리 (대소문자 무시)
                             elif text_upper.startswith('ANNOTATION:'):
@@ -1850,9 +1846,9 @@ def process_dxf(file_path, selected_sizes=None):
 
                                 # ANNOTATION에서 원단명 키워드 체크 (LINING 등)
                                 val_upper = val.upper()
-                                if val_upper in fabric_map:
+                                if val_upper in FABRIC_MAP:
                                     if not fabric_name:  # CATEGORY가 없을 때만
-                                        fabric_name = fabric_map[val_upper]
+                                        fabric_name = FABRIC_MAP[val_upper]
                                     continue
 
                                 # 사이즈 호칭 추출: <S>, <M>, <L>, <0X> 등
@@ -1892,9 +1888,34 @@ def process_dxf(file_path, selected_sizes=None):
                                 elif not pattern_name:
                                     pattern_name = val  # 영문 부위명 (한글 없을 때만)
 
+                            # TIIP 형식: COMMENT 필드 처리 (ANNOTATION과 유사)
+                            elif text_upper.startswith('COMMENT:'):
+                                val = text.split(':', 1)[1].strip()
+                                if not val:
+                                    continue
+                                # COMMENT에서 원단명 키워드 체크
+                                val_upper = val.upper()
+                                if val_upper in FABRIC_MAP:
+                                    if not fabric_name:
+                                        fabric_name = FABRIC_MAP[val_upper]
+                                    continue
+                                # 제외 대상: 숫자만, cm/mm 포함, 너무 긴 문자열
+                                if val.isdigit():
+                                    continue
+                                if 'cm' in val.lower() or 'mm' in val.lower():
+                                    continue
+                                if len(val) > 15:  # COMMENT는 설명이 길 수 있음
+                                    continue
+                                # 괄호 안 내용 제거 후 패턴명으로 사용
+                                clean_val = re.sub(r'\([^)]*\)', '', val).strip()
+                                if clean_val and not pattern_name:
+                                    # 한글이 포함된 짧은 이름만 패턴명으로
+                                    has_korean = any('\uac00' <= c <= '\ud7a3' for c in clean_val)
+                                    if has_korean and len(clean_val) <= 10:
+                                        pattern_name = clean_val
+
                     # 닫힌 POLYLINE/LWPOLYLINE이 없으면 열린 선분들을 연결하여 폴리곤 생성
                     if not max_poly:
-                        print(f"[DEBUG] 닫힌 폴리라인 없음, 열린 선분 연결 시도: {block_name}")
                         block_lines = []
                         seen_lines = set()  # 중복 선분 제거용
 
@@ -1952,7 +1973,6 @@ def process_dxf(file_path, selected_sizes=None):
                                     pass
 
                         # 선분들을 합쳐서 폴리곤 생성
-                        print(f"[DEBUG] 수집된 선분 수 (중복 제거 후): {len(block_lines)}")
                         if block_lines:
                             try:
                                 # 좌표 반올림으로 연결 오차 허용
@@ -1963,16 +1983,14 @@ def process_dxf(file_path, selected_sizes=None):
                                     rounded_lines.append(LineString(rounded_coords))
 
                                 polygons_from_lines = list(polygonize(rounded_lines))
-                                print(f"[DEBUG] 생성된 폴리곤 수: {len(polygons_from_lines)}")
                                 for poly in polygons_from_lines:
                                     if not poly.is_valid:
                                         poly = poly.buffer(0)
                                     if poly.is_valid and poly.area > max_area:
                                         max_area = poly.area
                                         max_poly = poly
-                                print(f"[DEBUG] 최종 max_area: {max_area}, max_poly: {max_poly is not None}")
                             except Exception as e:
-                                print(f"[DEBUG] 폴리곤 생성 오류: {e}")
+                                pass  # 폴리곤 생성 실패
 
                     # 원단명 기본값: 겉감
                     if not fabric_name:
@@ -2027,12 +2045,9 @@ def process_dxf(file_path, selected_sizes=None):
                                 if isinstance(combined, Polygon):
                                     max_poly = combined
                                     max_area = combined.area
-                                    print(f"[DEBUG] 미러링 적용: {block_name}, 새 면적={max_area:.2f}")
 
                     # 유효한 패턴만 추가 (너무 작은 패턴 제외)
-                    # 단위에 따라 면적이 다르므로 상대적으로 작은 패턴만 제외 (1 이상)
-                    print(f"[DEBUG] 필터 체크: max_area={max_area}, 조건={max_area >= 1}")
-                    if max_poly and max_area >= 1:
+                    if max_poly and max_area >= MIN_PATTERN_AREA:
                         # 선택된 사이즈 필터링 (selected_sizes가 지정된 경우)
                         if selected_sizes is not None:
                             # 사이즈명을 대문자로 비교
@@ -2041,8 +2056,37 @@ def process_dxf(file_path, selected_sizes=None):
                             if size_upper not in selected_upper:
                                 continue  # 선택되지 않은 사이즈는 건너뛰기
 
+                        # 내부선 추출 (외곽선 내부에 있는 LINE, 열린 POLYLINE만)
+                        interior_lines = []
+                        for be in block:
+                            line_coords = None
+                            # LINE 엔티티
+                            if be.dxftype() == 'LINE':
+                                start = (be.dxf.start.x, be.dxf.start.y)
+                                end = (be.dxf.end.x, be.dxf.end.y)
+                                line_coords = [start, end]
+                            # 열린 POLYLINE
+                            elif be.dxftype() == 'POLYLINE' and not be.is_closed:
+                                pts = list(be.points())
+                                if len(pts) >= 2:
+                                    line_coords = [(p[0], p[1]) for p in pts]
+                            # 열린 LWPOLYLINE
+                            elif be.dxftype() == 'LWPOLYLINE' and not be.closed:
+                                pts = list(be.points())
+                                if len(pts) >= 2:
+                                    line_coords = [(p[0], p[1]) for p in pts]
+
+                            # 외곽선 내부에 있는 선만 추가
+                            if line_coords and len(line_coords) >= 2:
+                                line_geom = LineString(line_coords)
+                                # 선의 중점이 외곽선 내부에 있는지 확인
+                                mid_point = line_geom.interpolate(0.5, normalized=True)
+                                if max_poly.contains(mid_point):
+                                    interior_lines.append(line_coords)
+
                         # 그레인라인 감지 및 패턴 회전 (수직 정렬)
                         grainline_info = None  # (start, end) 좌표
+                        rotation_applied = 0
                         grainline_angle, gl_start, gl_end = detect_grainline(block, return_coords=True, polygon=max_poly)
                         if grainline_angle is not None and gl_start and gl_end:
                             # 패턴 회전
@@ -2051,6 +2095,16 @@ def process_dxf(file_path, selected_sizes=None):
                             # 그레인라인 좌표도 함께 회전
                             gl_start, gl_end = rotate_grainline_coords(gl_start, gl_end, rotation_applied, centroid)
                             grainline_info = (gl_start, gl_end)
+                            # 내부선도 함께 회전
+                            if interior_lines and abs(rotation_applied) > 0.1:
+                                rotated_interior = []
+                                for line_coords in interior_lines:
+                                    rotated_line = []
+                                    for px, py in line_coords:
+                                        new_start, new_end = rotate_grainline_coords((px, py), (px, py), rotation_applied, centroid)
+                                        rotated_line.append(new_start)
+                                    rotated_interior.append(rotated_line)
+                                interior_lines = rotated_interior
 
                         # 단위 스케일 적용 (인치 → cm 변환)
                         if unit_scale != 1.0:
@@ -2061,15 +2115,19 @@ def process_dxf(file_path, selected_sizes=None):
                                 gl_start = (gl_start[0] * unit_scale, gl_start[1] * unit_scale)
                                 gl_end = (gl_end[0] * unit_scale, gl_end[1] * unit_scale)
                                 grainline_info = (gl_start, gl_end)
+                            # 내부선도 스케일 적용
+                            if interior_lines:
+                                scaled_interior = []
+                                for line_coords in interior_lines:
+                                    scaled_line = [(x * unit_scale, y * unit_scale) for x, y in line_coords]
+                                    scaled_interior.append(scaled_line)
+                                interior_lines = scaled_interior
                             max_area = max_poly.area
 
-                        # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity, grainline_info)
-                        final.append((max_poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity, grainline_info))
-                        print(f"[DEBUG] 패턴 추가: {pattern_name}, size={size_name}, area={max_area:.2f}")
-                except Exception as e:
-                    print(f"[DEBUG] 블록 처리 오류: {block_name} - {e}")
-                    import traceback
-                    traceback.print_exc()
+                        # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity, grainline_info, interior_lines)
+                        final.append((max_poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity, grainline_info, interior_lines))
+                except Exception:
+                    pass  # 블록 처리 실패
 
         # 방법 2: INSERT가 없으면 기존 방식 (레거시 DXF 호환)
         if not final:
@@ -2125,18 +2183,14 @@ def process_dxf(file_path, selected_sizes=None):
                         p = affinity.scale(p, xfact=unit_scale, yfact=unit_scale, origin=(0, 0))
 
                     added_polys.append(p)
-                    # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_qty, grainline_info)
-                    final.append((p, "", "겉감", "", str(idx + 1), "", 0, grainline_info))
+                    # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_qty, grainline_info, interior_lines)
+                    final.append((p, "", "겉감", "", str(idx + 1), "", 0, grainline_info, []))
 
         # 면적 기준 정렬 (큰 것부터)
         final.sort(key=lambda x: x[0].area, reverse=True)
-        print(f"[DEBUG] process_dxf 완료: {len(final)}개 패턴 추출")
         return final, detected_base_size
 
-    except Exception as e:
-        print(f"[DEBUG] process_dxf 오류: {e}")
-        import traceback
-        traceback.print_exc()
+    except Exception:
         return [], None
 
 
@@ -2397,7 +2451,6 @@ if uploaded_file is not None:
                             base_size_quantities_cache[pattern_group] = dxf_quantity
                         if fabric_name:
                             base_size_fabrics_cache[pattern_group] = fabric_name
-                print(f"[DEBUG] 기준사이즈 별도 로드: {detected_base_size}, qty={base_size_quantities_cache}")
 
             st.session_state.base_size_quantities_cache = base_size_quantities_cache
             st.session_state.base_size_fabrics_cache = base_size_fabrics_cache
@@ -2417,28 +2470,7 @@ if uploaded_file is not None:
             except:
                 pass
 
-        # 사이즈 목록 추출 (작은 사이즈 → 큰 사이즈 순)
-        def size_sort_key(size):
-            """사이즈를 작은 것부터 큰 것 순으로 정렬하기 위한 키"""
-            size_upper = size.upper()
-            # 표준 의류 사이즈 순서
-            standard_order = {
-                'XS': 10, 'S': 20, 'M': 30, 'L': 40,
-                'XL': 50, '2XL': 60, 'XXL': 60,
-                '3XL': 70, 'XXXL': 70,
-                '4XL': 80, '5XL': 90, '6XL': 100
-            }
-            if size_upper in standard_order:
-                return standard_order[size_upper]
-            # 숫자 사이즈 (85, 90, 95, 100, 105 등)
-            if size.isdigit():
-                return int(size)
-            # 0X, 2X, 4X 등 (아동/특수 사이즈)
-            if size_upper.endswith('X') and size_upper[:-1].isdigit():
-                return int(size_upper[:-1])
-            # 기타: 알파벳 순
-            return 500 + ord(size_upper[0]) if size_upper else 999
-
+        # 사이즈 목록 추출 (constants.size_sort_key 사용)
         all_sizes = sorted(set(p[3] for p in patterns if p[3]), key=size_sort_key)
         st.session_state.all_sizes = all_sizes
         st.session_state.selected_sizes = all_sizes.copy() if all_sizes else []
@@ -2537,18 +2569,12 @@ if uploaded_file is not None:
 
                 # 기준사이즈이고 pattern_group이 있는 경우 저장
                 if size_name == base_size and pattern_group:
-                    print(f"[DEBUG] 기준사이즈 패턴(선택됨): group={pattern_group}, qty={dxf_quantity}, fabric={fabric_name}")
                     if dxf_quantity > 0:
                         base_size_quantities[pattern_group] = dxf_quantity
                         base_size_has_any_quantity = True
                     if fabric_name:
                         base_size_fabrics[pattern_group] = fabric_name
                         base_size_has_any_fabric = True
-
-        # 디버그: 기준사이즈 정보 출력
-        print(f"[DEBUG] base_size={base_size}, has_qty={base_size_has_any_quantity}, has_fabric={base_size_has_any_fabric}")
-        print(f"[DEBUG] base_size_quantities={base_size_quantities}")
-        print(f"[DEBUG] base_size_fabrics={base_size_fabrics}")
 
         for i, p_data in enumerate(patterns):
             # 튜플: (poly, pattern_name, fabric_name, size_name, pattern_group, piece_name, dxf_quantity)
@@ -2592,11 +2618,8 @@ if uploaded_file is not None:
                     count = base_size_quantities[pattern_group]
                     default_desc = pattern_name if pattern_name else "확인"
                     db_used = True
-                    print(f"[DEBUG] 수량결정: size={size_name}, group={pattern_group} → 기준사이즈 수량 {count} 사용")
                 else:
-                    # pattern_group이 기준사이즈에 없는 경우 (추가 패턴 등)
-                    print(f"[DEBUG] 수량결정: size={size_name}, group={pattern_group} → 기준사이즈에 없음, 추론 사용")
-                    # 패턴 DB 예측 또는 형상 추론 사용
+                    # pattern_group이 기준사이즈에 없는 경우: 패턴 DB 예측 또는 형상 추론 사용
                     if pattern_db and len(pattern_db.records) > 0:
                         pred_qty, pred_cat, confidence, refs = pattern_db.predict_quantity(poly)
                         if confidence >= 0.5:
@@ -2833,7 +2856,8 @@ if uploaded_file is not None:
                                     group_patterns,
                                     st.session_state.selected_sizes,
                                     all_sizes,
-                                    global_max_dim
+                                    global_max_dim,
+                                    base_size
                                 )
                                 st.pyplot(fig, width='stretch')
                                 plt.close(fig)
@@ -2846,7 +2870,7 @@ if uploaded_file is not None:
         # B. 일괄 수정 도구 (Batch Edit Tools)
         # ----------------------------------------------------------------
         st.markdown("#### ✨ 일괄 수정 도구")
-        tool_col1, tool_col2, tool_col3 = st.columns([1.5, 1.5, 2])
+        tool_col1, tool_col2, tool_col3 = st.columns([2.5, 1, 1])
 
         # 패턴 그룹 매핑 (동일 패턴의 다른 사이즈 연결)
         all_sizes = st.session_state.get('all_sizes', [])
@@ -2871,9 +2895,9 @@ if uploaded_file is not None:
             if not all_sizes or size_name == base_size or not size_name:
                 base_indices_set.add(idx)
 
-        # 1. 전체 선택/해제/복사/삭제
+        # 1. 전체 선택/해제/복사/삭제/회전/뒤집기
         with tool_col1:
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
             if c1.button("✅전체", width='stretch', help="기본 사이즈 전체 선택"):
                 for i in base_indices_set: st.session_state[f"chk_{i}"] = True
                 st.rerun()
@@ -2949,6 +2973,116 @@ if uploaded_file is not None:
                     sort_by_fabric()  # 원단 우선 정렬
                     st.rerun()
 
+            # 회전/뒤집기 버튼들 (c5~c8)
+            def transform_selected_patterns(transform_func, update_dimensions=False):
+                """선택된 패턴에 변환 함수 적용"""
+                sel_indices = [i for i in base_indices_set if st.session_state.get(f"chk_{i}")]
+                if not sel_indices:
+                    return False
+                selected_sizes = st.session_state.get('selected_sizes', [])
+
+                # 선택한 패턴 + 모든 선택된 사이즈 확장
+                expanded_indices = set()
+                for idx in sel_indices:
+                    pattern_group = patterns[idx][4]
+                    fabric = st.session_state.df.loc[idx, '원단'] if idx < len(st.session_state.df) else ''
+                    group_key = (pattern_group, fabric)
+                    if pattern_group and group_key in group_to_indices:
+                        for size_name, size_idx in group_to_indices[group_key].items():
+                            if not selected_sizes or size_name in selected_sizes:
+                                expanded_indices.add(size_idx)
+                    else:
+                        expanded_indices.add(idx)
+
+                for idx in expanded_indices:
+                    p_data = list(st.session_state.patterns[idx])
+                    poly = p_data[0]
+                    transformed_poly, transformed_interior = transform_func(poly, p_data[8] if len(p_data) > 8 else [])
+                    p_data[0] = transformed_poly
+                    if len(p_data) > 8:
+                        p_data[8] = transformed_interior
+                    st.session_state.patterns[idx] = tuple(p_data)
+
+                    # 썸네일 갱신
+                    current_fabric = st.session_state.df.at[idx, "원단"]
+                    new_color = get_fabric_color_hex(current_fabric)
+                    st.session_state.df.at[idx, "형상"] = poly_to_base64(transformed_poly, new_color)
+
+                    # 가로/세로 업데이트 (회전 시)
+                    if update_dimensions:
+                        minx, miny, maxx, maxy = transformed_poly.bounds
+                        st.session_state.df.at[idx, "가로"] = round((maxx - minx) / 10, 1)
+                        st.session_state.df.at[idx, "세로"] = round((maxy - miny) / 10, 1)
+
+                # 썸네일 캐시 클리어
+                if 'thumbnail_cache' in st.session_state:
+                    st.session_state.thumbnail_cache = {}
+                return True
+
+            def rotate_90(poly, interior_lines):
+                """90도 회전"""
+                rotated_poly = affinity.rotate(poly, 90, origin='centroid')
+                if interior_lines:
+                    cx, cy = poly.centroid.x, poly.centroid.y
+                    rotated_interior = []
+                    for line_coords in interior_lines:
+                        rotated_line = [(cx - (y - cy), cy + (x - cx)) for x, y in line_coords]
+                        rotated_interior.append(rotated_line)
+                    return rotated_poly, rotated_interior
+                return rotated_poly, []
+
+            def rotate_180(poly, interior_lines):
+                """180도 회전"""
+                rotated_poly = affinity.rotate(poly, 180, origin='centroid')
+                if interior_lines:
+                    cx, cy = poly.centroid.x, poly.centroid.y
+                    rotated_interior = []
+                    for line_coords in interior_lines:
+                        rotated_line = [(2 * cx - x, 2 * cy - y) for x, y in line_coords]
+                        rotated_interior.append(rotated_line)
+                    return rotated_poly, rotated_interior
+                return rotated_poly, []
+
+            def flip_y(poly, interior_lines):
+                """Y축 뒤집기 (상하 반전)"""
+                flipped_poly = affinity.scale(poly, xfact=1, yfact=-1, origin='centroid')
+                if interior_lines:
+                    cy = poly.centroid.y
+                    flipped_interior = []
+                    for line_coords in interior_lines:
+                        flipped_line = [(x, 2 * cy - y) for x, y in line_coords]
+                        flipped_interior.append(flipped_line)
+                    return flipped_poly, flipped_interior
+                return flipped_poly, []
+
+            def flip_x(poly, interior_lines):
+                """X축 뒤집기 (좌우 반전)"""
+                flipped_poly = affinity.scale(poly, xfact=-1, yfact=1, origin='centroid')
+                if interior_lines:
+                    cx = poly.centroid.x
+                    flipped_interior = []
+                    for line_coords in interior_lines:
+                        flipped_line = [(2 * cx - x, y) for x, y in line_coords]
+                        flipped_interior.append(flipped_line)
+                    return flipped_poly, flipped_interior
+                return flipped_poly, []
+
+            if c5.button("🔄90°", width='stretch', help="선택 패턴 90° 회전"):
+                if transform_selected_patterns(rotate_90, update_dimensions=True):
+                    st.rerun()
+
+            if c6.button("🔁180°", width='stretch', help="선택 패턴 180° 회전"):
+                if transform_selected_patterns(rotate_180, update_dimensions=False):
+                    st.rerun()
+
+            if c7.button("↕Y반전", width='stretch', help="선택 패턴 상하 반전"):
+                if transform_selected_patterns(flip_y, update_dimensions=False):
+                    st.rerun()
+
+            if c8.button("↔X반전", width='stretch', help="선택 패턴 좌우 반전"):
+                if transform_selected_patterns(flip_x, update_dimensions=False):
+                    st.rerun()
+
         # 2. 원단명 변경 (선택 패턴의 모든 사이즈에 적용)
         with tool_col2:
             f1, f2 = st.columns([3, 1])
@@ -2995,17 +3129,13 @@ if uploaded_file is not None:
                         pattern_group = patterns[idx][4]
                         fabric = st.session_state.df.loc[idx, '원단'] if idx < len(st.session_state.df) else ''
                         group_key = (pattern_group, fabric)
-                        print(f"[DEBUG] 수량변경: idx={idx}, pattern_group='{pattern_group}', fabric='{fabric}', in_group_map={group_key in group_to_indices if pattern_group else False}")
                         if pattern_group and group_key in group_to_indices:
                             for size_name, size_idx in group_to_indices[group_key].items():
                                 if not selected_sizes or size_name in selected_sizes:
                                     expanded_indices.add(size_idx)
-                                    print(f"[DEBUG]   → 확장: size={size_name}, idx={size_idx}")
                         else:
                             expanded_indices.add(idx)
-                            print(f"[DEBUG]   → pattern_group 없음, 단일 idx만 추가")
 
-                    print(f"[DEBUG] 수량변경 대상 인덱스: {sorted(expanded_indices)}")
                     for idx in expanded_indices:
                         st.session_state.df.at[idx, "수량"] = new_count
                     st.rerun()
