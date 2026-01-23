@@ -3283,6 +3283,7 @@ if uploaded_file is not None:
             if edited_df is not None:
                 selected_sizes = st.session_state.get('selected_sizes', [])
                 all_sizes = st.session_state.get('all_sizes', [])
+                any_change = False  # 변경 여부 플래그
 
                 for i in range(len(edited_df)):
                     base_idx = base_indices[i] if i < len(base_indices) else i
@@ -3298,6 +3299,7 @@ if uploaded_file is not None:
                     has_change = (old_fabric != new_fabric or old_qty != new_qty or old_cat != new_cat)
 
                     if has_change:
+                        any_change = True
                         base_size = patterns[base_idx][3]
                         base_area = st.session_state.df.at[base_idx, "면적_raw"]
 
@@ -3328,8 +3330,9 @@ if uploaded_file is not None:
                         if old_cat != new_cat:
                             update_nesting_pattern_names()
 
-                        # 변경 후 새로고침하여 요척결과 갱신
-                        st.rerun()
+                # 변경이 있었을 때만 한 번 리렌더링
+                if any_change:
+                    st.rerun()
 
         # [오른쪽] 요척 결과 카드 (Compact View) - 사이즈별 표시
         with col2:
