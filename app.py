@@ -49,7 +49,22 @@ except ImportError:
     SPARROW_AVAILABLE = False
 
 
-def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spacing, allow_mirror=False, buffer_mm=0):
+def extract_english_size(size_val):
+    """
+    사이즈 문자열에서 영문/숫자 부분만 추출
+    예: "S축적용" → "S", "XL축적용" → "XL", "M축적용" → "M"
+    """
+    import re
+    if not size_val:
+        return size_val
+    # 앞부분의 영문/숫자만 추출 (0X, XL, S, M, L, 2XL, 85, 90 등)
+    match = re.match(r'^([A-Za-z0-9]+)', size_val.strip())
+    if match:
+        return match.group(1)
+    return size_val
+
+
+def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spacing, allow_mirror=False, buffer_mm=0, allow_90_rotation=False, seed=42, pattern_order="default"):
     """
     Sparrow 네스팅 실행
 
@@ -61,10 +76,24 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         spacing: 패턴 간격 (mm) - cm로 변환하여 적용
         allow_mirror: 뒤집기(좌우 미러링) 허용 여부
         buffer_mm: 패턴 둘레 버퍼 (mm) - 패턴 외곽으로 확장하여 블로킹
+        allow_90_rotation: 90도 회전 허용 여부
+        seed: 랜덤 시드 (다른 배치 결과 생성)
+        pattern_order: 패턴 입력 순서 ("default", "large_first", "small_first", "random")
 
     Returns:
         네스팅 결과 딕셔너리
     """
+    # 패턴 순서 정렬
+    import random
+    sorted_pattern_data = pattern_data.copy()
+    if pattern_order == "large_first":
+        sorted_pattern_data.sort(key=lambda p: p.get('area_cm2', 0), reverse=True)
+    elif pattern_order == "small_first":
+        sorted_pattern_data.sort(key=lambda p: p.get('area_cm2', 0))
+    elif pattern_order == "random":
+        random.seed(seed)
+        random.shuffle(sorted_pattern_data)
+
     # spyrrow Item 생성
     items = []
     total_area = 0
@@ -75,7 +104,7 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
     original_shapes = {}  # id -> 원본 좌표 (Sparrow 좌표계)
     grainline_data = {}  # id -> 그레인라인 좌표 (Sparrow 좌표계)
 
-    for p in pattern_data:
+    for p in sorted_pattern_data:
         coords = list(p['coords_cm'])
         # 닫힌 폴리곤으로 변환
         if coords[0] != coords[-1]:
@@ -84,10 +113,55 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         # 원본 좌표 저장 (버퍼 적용 전)
         original_coords = coords.copy()
 
-        # 버퍼 적용 (패턴 둘레 확장)
-        if buffer_cm > 0:
-            from shapely.geometry import Polygon as ShapelyPolygon
-            poly = ShapelyPolygon(coords)
+        # 패턴별 상하좌우 버퍼 (mm -> cm)
+        buf_top_cm = p.get('buffer_top', 0) / 10
+        buf_bottom_cm = p.get('buffer_bottom', 0) / 10
+        buf_left_cm = p.get('buffer_left', 0) / 10
+        buf_right_cm = p.get('buffer_right', 0) / 10
+        has_directional_buffer = (buf_top_cm > 0 or buf_bottom_cm > 0 or buf_left_cm > 0 or buf_right_cm > 0)
+
+        # 버퍼 적용 (패턴별 상하좌우 또는 전역 둘레 버퍼)
+        from shapely.geometry import Polygon as ShapelyPolygon, box
+        from shapely.ops import unary_union
+        poly = ShapelyPolygon(coords)
+
+        if has_directional_buffer:
+            # 상하좌우 개별 버퍼 적용 (affine 변환 사용)
+            # 패턴을 상하좌우 방향으로 확장
+            from shapely import affinity
+
+            minx, miny, maxx, maxy = poly.bounds
+            width = maxx - minx
+            height = maxy - miny
+
+            if width > 0 and height > 0:
+                # 중심점 계산
+                cx = (minx + maxx) / 2
+                cy = (miny + maxy) / 2
+
+                # 확장 비율 계산 (버퍼를 포함한 새로운 크기)
+                new_width = width + buf_left_cm + buf_right_cm
+                new_height = height + buf_top_cm + buf_bottom_cm
+                scale_x = new_width / width
+                scale_y = new_height / height
+
+                # 스케일 적용 (중심 기준)
+                scaled_poly = affinity.scale(poly, xfact=scale_x, yfact=scale_y, origin=(cx, cy))
+
+                # 비대칭 버퍼 보정 (좌우/상하 버퍼가 다를 경우 이동)
+                offset_x = (buf_right_cm - buf_left_cm) / 2
+                offset_y = (buf_top_cm - buf_bottom_cm) / 2
+                buffered_poly = affinity.translate(scaled_poly, xoff=offset_x, yoff=offset_y)
+
+                if buffered_poly.is_valid and not buffered_poly.is_empty:
+                    if buffered_poly.geom_type == 'Polygon':
+                        coords = list(buffered_poly.exterior.coords)
+                    else:
+                        # MultiPolygon인 경우 가장 큰 폴리곤 사용
+                        largest = max(buffered_poly.geoms, key=lambda g: g.area)
+                        coords = list(largest.exterior.coords)
+        elif buffer_cm > 0:
+            # 전역 둘레 버퍼 (기존 방식)
             buffered_poly = poly.buffer(buffer_cm, join_style=2)  # join_style=2: mitre (각진 모서리)
             if buffered_poly.is_valid and not buffered_poly.is_empty:
                 coords = list(buffered_poly.exterior.coords)
@@ -123,8 +197,12 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
         for q in range(p['quantity']):
             unique_id = f"{p['pattern_id']}_{item_idx}"
 
-            # 180도 회전 옵션 (항상 독립 적용)
-            orientations = [0, 180] if allow_rotation else [0]
+            # 회전 옵션 설정
+            orientations = [0]
+            if allow_rotation:
+                orientations.append(180)
+            if allow_90_rotation:
+                orientations.extend([90, 270])
 
             # 좌우 마주 보기 옵션 (180도 회전과 독립)
             if allow_mirror:
@@ -164,7 +242,7 @@ def run_sparrow_nesting(pattern_data, width_cm, time_limit, allow_rotation, spac
     config = spyrrow.StripPackingConfig(
         total_computation_time=time_limit,
         min_items_separation=spacing_cm if spacing_cm > 0 else None,
-        seed=42
+        seed=seed
     )
 
     # 실행
@@ -329,10 +407,6 @@ def create_sparrow_visualization(result, sheet_width_cm):
         unique_patterns = list(set(p['pattern_id'].split('\n')[0] for p in result['placements']))
         pattern_color_map = {name: colors[i % len(colors)] for i, name in enumerate(unique_patterns)}
 
-    # 버퍼 사용 여부 확인
-    buffer_mm = result.get('buffer_mm', 0)
-    has_buffer = buffer_mm > 0
-
     # 패턴 그리기
     for i, p in enumerate(result['placements']):
         coords = p['coords']  # 버퍼 적용된 좌표
@@ -360,10 +434,13 @@ def create_sparrow_visualization(result, sheet_width_cm):
                 pattern_name = p['pattern_id'].split('\n')[0]
                 color = pattern_color_map.get(pattern_name, colors[0])
 
-            # 버퍼가 있으면 버퍼 영역(연한 색) + 원본 패턴(진한 색) 표시
-            if has_buffer and original_coords:
-                # 버퍼 영역 (연한 색, 점선 테두리)
-                ax.fill(xs, ys, alpha=0.3, facecolor=color, edgecolor='gray', linewidth=0.5, linestyle='--')
+            # 버퍼 적용 여부 확인 (원본 좌표가 있고 버퍼 좌표와 다르면 버퍼 적용됨)
+            has_buffer = original_coords and coords != original_coords
+
+            # 버퍼가 있으면 버퍼 영역(실선 테두리) + 원본 패턴(진한 색) 표시
+            if has_buffer:
+                # 버퍼 영역 (실선 테두리, 연한 배경)
+                ax.fill(xs, ys, alpha=0.2, facecolor=color, edgecolor='#333333', linewidth=1.0, linestyle='-')
 
                 # 원본 패턴 (진한 색, 실선 테두리)
                 orig_xs = [c[0] for c in original_coords]
@@ -480,9 +557,16 @@ st.markdown("""
     
     /* 체크박스 중앙 정렬 보정 */
     div[data-testid="stColumn"] div[data-testid="stCheckbox"] {
-        display: flex;
-        justify-content: center;
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
         margin-top: -2px;
+    }
+    div[data-testid="stColumn"] div[data-testid="stCheckbox"] > label {
+        justify-content: center !important;
+    }
+    div[data-testid="stColumn"] div[data-testid="stCheckbox"] > label > div {
+        margin-right: 0 !important;
     }
     
     /* 기본 툴바 및 풀스크린 버튼 숨기기 (깔끔한 UI 유지) */
@@ -934,11 +1018,12 @@ def get_cached_thumbnail(idx, poly, fabric_name, zoom_span, grainline_info=None)
 
 def create_overlay_visualization(patterns_group, selected_sizes, all_sizes, global_max_dim=None, base_size=None):
     """
-    동일 패턴 그룹의 여러 사이즈를 중첩하여 시각화
+    동일 패턴 그룹의 여러 사이즈를 중첩하여 시각화 (Plotly 인터랙티브)
     - 바탕색 없이 외곽선만 표시
     - 사이즈별 다른 색상 외곽선
     - 중심 정렬로 크기 비교
     - 기준사이즈의 내부선(스티치선, 시접선) 표시
+    - 마우스 휠로 확대/축소, 드래그로 패닝 가능
 
     Args:
         patterns_group: [(poly, pattern_name, fabric_name, size_name, pattern_group, ..., interior_lines), ...] 동일 그룹
@@ -948,23 +1033,25 @@ def create_overlay_visualization(patterns_group, selected_sizes, all_sizes, glob
         base_size: 기준사이즈 (내부선 표시용)
 
     Returns:
-        matplotlib figure
+        plotly figure
     """
+    import plotly.graph_objects as go
     import matplotlib.pyplot as plt
-    import matplotlib.lines as mlines
 
-    fig, ax = plt.subplots(figsize=(6, 6))  # 패턴 크게 표시
+    fig = go.Figure()
 
-    # 사이즈별 색상 (파랑→빨강 그라데이션)
+    # 사이즈별 색상 (파랑→빨강 그라데이션) - matplotlib colormap 활용
     size_colors = {}
     cmap = plt.cm.get_cmap('coolwarm', len(all_sizes) + 1)
     for i, size in enumerate(all_sizes):
-        size_colors[size] = cmap(i / max(len(all_sizes) - 1, 1))
+        rgba = cmap(i / max(len(all_sizes) - 1, 1))
+        # RGBA to hex
+        size_colors[size] = f'rgba({int(rgba[0]*255)},{int(rgba[1]*255)},{int(rgba[2]*255)},{rgba[3]})'
 
     # 모든 패턴의 경계 계산 (중심 맞추기용)
     all_bounds = []
     for p_data in patterns_group:
-        poly = p_data[0]  # 첫 번째 요소가 poly
+        poly = p_data[0]
         all_bounds.append(poly.bounds)
 
     if not all_bounds:
@@ -982,72 +1069,111 @@ def create_overlay_visualization(patterns_group, selected_sizes, all_sizes, glob
     # 사이즈 순서대로 그리기 (큰 것부터)
     sorted_patterns = sorted(patterns_group, key=lambda x: x[0].area, reverse=True)
 
-    legend_handles = []
     drawn_sizes = set()
 
     for p_data in sorted_patterns:
         poly = p_data[0]
-        size_name = p_data[3]  # 4번째 요소
+        size_name = p_data[3]
 
         if not size_name:
             continue
 
-        # 원본 DXF 위치 그대로 사용 (중심 이동 없음)
+        # 원본 DXF 위치 그대로 사용
         x, y = poly.exterior.xy
+        x_list = list(x)
+        y_list = list(y)
 
         # 사이즈별 색상
-        color = size_colors.get(size_name, 'gray')
+        color = size_colors.get(size_name, 'rgba(128,128,128,1)')
         is_selected = size_name in selected_sizes
 
         # 선택된 사이즈: 실선, 미선택: 점선+흐리게
+        show_legend = size_name not in drawn_sizes
+        drawn_sizes.add(size_name)
+
         if is_selected:
-            ax.plot(x, y, color=color, linewidth=1.0, linestyle='-', alpha=1.0)
+            fig.add_trace(go.Scatter(
+                x=x_list, y=y_list,
+                mode='lines',
+                line=dict(color=color, width=1.5),
+                name=size_name,
+                showlegend=show_legend,
+                hoverinfo='name'
+            ))
         else:
-            ax.plot(x, y, color=color, linewidth=0.1, linestyle='--', alpha=0.4)
+            fig.add_trace(go.Scatter(
+                x=x_list, y=y_list,
+                mode='lines',
+                line=dict(color=color, width=0.5, dash='dash'),
+                opacity=0.4,
+                name=size_name,
+                showlegend=show_legend,
+                hoverinfo='name'
+            ))
 
         # 기준사이즈인 경우 내부선(스티치선, 시접선) 표시
         if base_size and size_name == base_size and is_selected:
-            # 내부선은 튜플의 9번째 요소 (index 8)
             if len(p_data) > 8 and p_data[8]:
                 interior_lines = p_data[8]
                 for line_coords in interior_lines:
                     if len(line_coords) >= 2:
                         line_x = [c[0] for c in line_coords]
                         line_y = [c[1] for c in line_coords]
-                        ax.plot(line_x, line_y, color=color, linewidth=0.5, linestyle='-', alpha=0.7)
-
-        # 범례용 핸들 (사이즈당 하나만)
-        if size_name not in drawn_sizes:
-            drawn_sizes.add(size_name)
-            line = mlines.Line2D([], [], color=color,
-                                 linewidth=1.0 if is_selected else 0.1,
-                                 linestyle='-' if is_selected else '--',
-                                 alpha=1.0 if is_selected else 0.5,
-                                 label=size_name)
-            legend_handles.append(line)
+                        fig.add_trace(go.Scatter(
+                            x=line_x, y=line_y,
+                            mode='lines',
+                            line=dict(color=color, width=1.5),
+                            opacity=1.0,
+                            showlegend=False,
+                            hoverinfo='skip'
+                        ))
 
     # 축 설정 - 전역 최대 크기 사용 (모든 패턴 동일 비율)
     if global_max_dim:
-        # 전역 크기 기준으로 뷰포트 설정
         margin = global_max_dim * 0.15
         half_dim = global_max_dim / 2 + margin
-        ax.set_xlim(center_x - half_dim, center_x + half_dim)
-        ax.set_ylim(center_y - half_dim, center_y + half_dim)
+        x_range = [center_x - half_dim, center_x + half_dim]
+        y_range = [center_y - half_dim, center_y + half_dim]
     else:
-        # 개별 패턴 크기 기준 (기존 방식)
         margin = max(max_x - min_x, max_y - min_y) * 0.15
-        ax.set_xlim(min_x - margin, max_x + margin)
-        ax.set_ylim(min_y - margin, max_y + margin)
-    ax.set_aspect('equal')
-    ax.axis('off')
+        x_range = [min_x - margin, max_x + margin]
+        y_range = [min_y - margin, max_y + margin]
 
-    # 범례 (사이즈 순서대로)
-    if legend_handles:
-        sorted_handles = sorted(legend_handles, key=lambda x: x.get_label())
-        ax.legend(handles=sorted_handles, loc='upper right', fontsize=8,
-                  framealpha=0.9, handlelength=2.0)
+    fig.update_layout(
+        xaxis=dict(
+            range=x_range,
+            scaleanchor='y',
+            scaleratio=1,
+            showgrid=False,
+            showticklabels=False,
+            zeroline=False
+        ),
+        yaxis=dict(
+            range=y_range,
+            showgrid=False,
+            showticklabels=False,
+            zeroline=False
+        ),
+        showlegend=True,
+        legend=dict(
+            orientation='h',
+            yanchor='bottom',
+            y=1.02,
+            xanchor='center',
+            x=0.5,
+            font=dict(size=10)
+        ),
+        margin=dict(l=5, r=5, t=30, b=5),
+        height=300,
+        dragmode='pan',  # 기본 드래그 모드를 팬으로 설정
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)'
+    )
 
-    plt.tight_layout()
+    # 확대/축소, 패닝 활성화
+    fig.update_xaxes(fixedrange=False)
+    fig.update_yaxes(fixedrange=False)
+
     return fig
 
 
@@ -1616,7 +1742,8 @@ def scan_dxf_sizes(file_path):
                     if text_upper.startswith(prefix):
                         base_val = text.split(':', 1)[1].strip().upper()
                         if base_val:
-                            base_size = base_val
+                            # 영문/숫자만 추출 (예: "M축적용" → "M")
+                            base_size = extract_english_size(base_val)
                         break
 
         # 방법 1: INSERT 블록에서 사이즈 추출
@@ -1640,6 +1767,8 @@ def scan_dxf_sizes(file_path):
                             if text_upper.startswith('SIZE:'):
                                 size_val = text.split(':', 1)[1].strip()
                                 if size_val:
+                                    # 영문/숫자만 추출 (예: "S축적용" → "S")
+                                    size_val = extract_english_size(size_val)
                                     sizes.add(size_val.upper())
                             # 기준사이즈 추출 (여러 패턴 지원)
                             elif not base_size:
@@ -1647,7 +1776,8 @@ def scan_dxf_sizes(file_path):
                                     if text_upper.startswith(prefix):
                                         base_val = text.split(':', 1)[1].strip().upper()
                                         if base_val:
-                                            base_size = base_val
+                                            # 영문/숫자만 추출
+                                            base_size = extract_english_size(base_val)
                                         break
                 except:
                     pass
@@ -1810,7 +1940,8 @@ def process_dxf(file_path, selected_sizes=None):
                             elif text_upper.startswith('SIZE:'):
                                 size_val = text.split(':', 1)[1].strip()
                                 if size_val:
-                                    size_name = size_val
+                                    # 영문/숫자만 추출 (예: "S축적용" → "S")
+                                    size_name = extract_english_size(size_val)
 
                             # CATEGORY 필드에서 원단명 추출 (대소문자 무시)
                             elif text_upper.startswith('CATEGORY:'):
@@ -1855,7 +1986,8 @@ def process_dxf(file_path, selected_sizes=None):
                                 if val.startswith('<') and val.endswith('>'):
                                     extracted_size = val[1:-1].strip()
                                     if extracted_size and not size_name:
-                                        size_name = extracted_size
+                                        # 영문/숫자만 추출 (예: "S축적용" → "S")
+                                        size_name = extract_english_size(extracted_size)
                                     continue
 
                                 # 제외 대상 체크
@@ -2056,32 +2188,95 @@ def process_dxf(file_path, selected_sizes=None):
                             if size_upper not in selected_upper:
                                 continue  # 선택되지 않은 사이즈는 건너뛰기
 
-                        # 내부선 추출 (외곽선 내부에 있는 LINE, 열린 POLYLINE만)
+                        # 내부선 추출 (외곽선 내부에 있는 LINE, POLYLINE, ARC, SPLINE 등)
                         interior_lines = []
+                        # 외곽선 좌표 (비교용)
+                        exterior_coords = set((round(x, 1), round(y, 1)) for x, y in max_poly.exterior.coords)
+
                         for be in block:
                             line_coords = None
-                            # LINE 엔티티
-                            if be.dxftype() == 'LINE':
-                                start = (be.dxf.start.x, be.dxf.start.y)
-                                end = (be.dxf.end.x, be.dxf.end.y)
-                                line_coords = [start, end]
-                            # 열린 POLYLINE
-                            elif be.dxftype() == 'POLYLINE' and not be.is_closed:
-                                pts = list(be.points())
-                                if len(pts) >= 2:
-                                    line_coords = [(p[0], p[1]) for p in pts]
-                            # 열린 LWPOLYLINE
-                            elif be.dxftype() == 'LWPOLYLINE' and not be.closed:
-                                pts = list(be.points())
-                                if len(pts) >= 2:
-                                    line_coords = [(p[0], p[1]) for p in pts]
+                            try:
+                                # LINE 엔티티
+                                if be.dxftype() == 'LINE':
+                                    start = (be.dxf.start.x, be.dxf.start.y)
+                                    end = (be.dxf.end.x, be.dxf.end.y)
+                                    line_coords = [start, end]
 
-                            # 외곽선 내부에 있는 선만 추가
+                                # POLYLINE (열린/닫힌 모두)
+                                elif be.dxftype() == 'POLYLINE':
+                                    pts = list(be.points())
+                                    if len(pts) >= 2:
+                                        line_coords = [(p[0], p[1]) for p in pts]
+                                        if be.is_closed and len(line_coords) > 2:
+                                            line_coords.append(line_coords[0])  # 닫힌 경우 시작점 추가
+
+                                # LWPOLYLINE (열린/닫힌 모두)
+                                elif be.dxftype() == 'LWPOLYLINE':
+                                    pts = list(be.get_points(format='xy'))
+                                    if len(pts) >= 2:
+                                        line_coords = [(p[0], p[1]) for p in pts]
+                                        if be.closed and len(line_coords) > 2:
+                                            line_coords.append(line_coords[0])  # 닫힌 경우 시작점 추가
+
+                                # ARC 엔티티 (호)
+                                elif be.dxftype() == 'ARC':
+                                    cx, cy = be.dxf.center.x, be.dxf.center.y
+                                    r = be.dxf.radius
+                                    start_angle = math.radians(be.dxf.start_angle)
+                                    end_angle = math.radians(be.dxf.end_angle)
+                                    # 호를 여러 점으로 분할
+                                    if end_angle < start_angle:
+                                        end_angle += 2 * math.pi
+                                    num_points = max(10, int((end_angle - start_angle) / math.radians(10)))
+                                    angles = [start_angle + (end_angle - start_angle) * i / num_points for i in range(num_points + 1)]
+                                    line_coords = [(cx + r * math.cos(a), cy + r * math.sin(a)) for a in angles]
+
+                                # SPLINE 엔티티
+                                elif be.dxftype() == 'SPLINE':
+                                    try:
+                                        # 스플라인을 폴리라인으로 근사
+                                        pts = list(be.flattening(0.5))  # 허용 오차 0.5
+                                        if len(pts) >= 2:
+                                            line_coords = [(p[0], p[1]) for p in pts]
+                                    except:
+                                        # flattening 실패 시 제어점 사용
+                                        if hasattr(be, 'control_points'):
+                                            pts = list(be.control_points)
+                                            if len(pts) >= 2:
+                                                line_coords = [(p[0], p[1]) for p in pts]
+
+                                # CIRCLE 엔티티 (원)
+                                elif be.dxftype() == 'CIRCLE':
+                                    cx, cy = be.dxf.center.x, be.dxf.center.y
+                                    r = be.dxf.radius
+                                    num_points = 36
+                                    angles = [2 * math.pi * i / num_points for i in range(num_points + 1)]
+                                    line_coords = [(cx + r * math.cos(a), cy + r * math.sin(a)) for a in angles]
+
+                                # ELLIPSE 엔티티 (타원)
+                                elif be.dxftype() == 'ELLIPSE':
+                                    try:
+                                        pts = list(be.flattening(0.5))
+                                        if len(pts) >= 2:
+                                            line_coords = [(p[0], p[1]) for p in pts]
+                                    except:
+                                        pass
+                            except:
+                                continue
+
+                            # 외곽선 내부에 있는 선만 추가 (외곽선 자체는 제외)
                             if line_coords and len(line_coords) >= 2:
+                                # 외곽선과 동일한 좌표인지 확인
+                                line_coords_rounded = set((round(x, 1), round(y, 1)) for x, y in line_coords)
+                                overlap_ratio = len(line_coords_rounded & exterior_coords) / max(len(line_coords_rounded), 1)
+                                if overlap_ratio > 0.8:  # 80% 이상 겹치면 외곽선 → 스킵
+                                    continue
+
                                 line_geom = LineString(line_coords)
-                                # 선의 중점이 외곽선 내부에 있는지 확인
-                                mid_point = line_geom.interpolate(0.5, normalized=True)
-                                if max_poly.contains(mid_point):
+                                # 선의 여러 지점이 외곽선 내부에 있는지 확인
+                                check_points = [0.25, 0.5, 0.75]
+                                inside_count = sum(1 for t in check_points if max_poly.contains(line_geom.interpolate(t, normalized=True)))
+                                if inside_count >= 2:  # 3개 중 2개 이상이 내부에 있으면 추가
                                     interior_lines.append(line_coords)
 
                         # 그레인라인 감지 및 패턴 회전 (수직 정렬)
@@ -2473,18 +2668,28 @@ if uploaded_file is not None:
         # 사이즈 목록 추출 (constants.size_sort_key 사용)
         all_sizes = sorted(set(p[3] for p in patterns if p[3]), key=size_sort_key)
         st.session_state.all_sizes = all_sizes
-        st.session_state.selected_sizes = all_sizes.copy() if all_sizes else []
 
         # 기준사이즈 결정
         # 1순위: DXF에서 추출한 기준사이즈 (BASE_SIZE: 또는 REF_SIZE:)
-        # 2순위: 없으면 가운데 사이즈 사용
+        # 2순위: M 사이즈가 있으면 M 사용 (의류 산업 표준)
+        # 3순위: 없으면 가운데 사이즈 사용
         if detected_base_size and detected_base_size in all_sizes:
             st.session_state.base_size = detected_base_size
+        elif 'M' in all_sizes:
+            st.session_state.base_size = 'M'
         elif all_sizes:
             mid_idx = len(all_sizes) // 2
             st.session_state.base_size = all_sizes[mid_idx]
         else:
             st.session_state.base_size = None
+
+        # 선택 사이즈 초기화 (기준사이즈만 선택)
+        if st.session_state.base_size and st.session_state.base_size in all_sizes:
+            st.session_state.selected_sizes = [st.session_state.base_size]
+        elif all_sizes:
+            st.session_state.selected_sizes = [all_sizes[0]]
+        else:
+            st.session_state.selected_sizes = []
 
         # 누락된 사이즈 패턴 자동 채우기
         # pattern_group별로 어떤 사이즈가 있는지 확인하고, 기준사이즈 패턴으로 채움
@@ -2708,7 +2913,8 @@ if uploaded_file is not None:
                 "번호": pattern_num, "사이즈": info['size_name'], "원단": info['extracted_fabric'],
                 "구분": info['desc'], "수량": info['count'],
                 "가로(cm)": round(info['w'], 1), "세로(cm)": round(info['h'], 1),
-                "면적_raw": info['poly'].area / 1000000
+                "면적_raw": info['poly'].area / 1000000,
+                "버퍼_상": 0, "버퍼_하": 0, "버퍼_좌": 0, "버퍼_우": 0  # 패턴별 상하좌우 버퍼 (mm)
             })
         st.session_state.df = pd.DataFrame(data_list)
         # 원단별 정렬 (기본 정렬) - patterns 리스트도 동기화
@@ -2811,13 +3017,14 @@ if uploaded_file is not None:
                             group_key = pattern_name
                         else:
                             group_key = "기타"
-                        pattern_groups[group_key].append(p_data)
+                        # 인덱스와 함께 저장 (수량 조회용)
+                        pattern_groups[group_key].append((idx, p_data))
 
                 if pattern_groups:
                     # 전역 최대 크기 계산 (모든 패턴에 동일 비율 적용)
                     global_max_dim = 0
                     for group_patterns in pattern_groups.values():
-                        for p_data in group_patterns:
+                        for idx, p_data in group_patterns:
                             poly = p_data[0]
                             minx, miny, maxx, maxy = poly.bounds
                             max_dim = max(maxx - minx, maxy - miny)
@@ -2851,16 +3058,44 @@ if uploaded_file is not None:
 
                         for col_idx, (group_name, group_patterns) in enumerate(row_groups):
                             with overlay_cols[col_idx]:
-                                st.caption(f"**{group_name}번** ({len(group_patterns)}개)")
+                                # 사이즈 목록 추출
+                                sizes_in_group = [p_data[3] for idx, p_data in group_patterns if p_data[3]]
+                                sizes_display = ','.join(sizes_in_group) if sizes_in_group else ''
+
+                                # 기준사이즈 패턴의 수량 가져오기
+                                quantity = None
+                                for idx, p_data in group_patterns:
+                                    if p_data[3] == base_size:  # 기준사이즈인 경우
+                                        if idx < len(df):
+                                            quantity = df.loc[idx, '수량'] if '수량' in df.columns else None
+                                        break
+                                # 기준사이즈가 없으면 첫 번째 패턴의 수량 사용
+                                if quantity is None and group_patterns:
+                                    first_idx = group_patterns[0][0]
+                                    if first_idx < len(df) and '수량' in df.columns:
+                                        quantity = df.loc[first_idx, '수량']
+
+                                # 캡션: "3번 (S,M,L) - 수량: 2장"
+                                if quantity is not None:
+                                    st.caption(f"**{group_name}번** ({sizes_display}) - 수량: {quantity}장")
+                                else:
+                                    st.caption(f"**{group_name}번** ({sizes_display})")
+
+                                # create_overlay_visualization에는 p_data만 전달
+                                patterns_only = [p_data for idx, p_data in group_patterns]
                                 fig = create_overlay_visualization(
-                                    group_patterns,
+                                    patterns_only,
                                     st.session_state.selected_sizes,
                                     all_sizes,
                                     global_max_dim,
                                     base_size
                                 )
-                                st.pyplot(fig, width='stretch')
-                                plt.close(fig)
+                                st.plotly_chart(fig, use_container_width=True, config={
+                                    'scrollZoom': True,  # 마우스 휠 확대/축소
+                                    'displayModeBar': True,
+                                    'modeBarButtonsToRemove': ['select2d', 'lasso2d', 'autoScale2d'],
+                                    'displaylogo': False
+                                })
                 else:
                     st.info("사이즈 정보가 있는 패턴이 없습니다.")
 
@@ -3140,6 +3375,43 @@ if uploaded_file is not None:
                         st.session_state.df.at[idx, "수량"] = new_count
                     st.rerun()
 
+        # 4. 버퍼 설정 (선택 패턴의 상하좌우 버퍼) - 숨김 처리
+        # st.markdown("##### 📐 패턴별 버퍼 설정 (mm)")
+        # buf_col1, buf_col2, buf_col3, buf_col4, buf_col5 = st.columns([1, 1, 1, 1, 1])
+        # with buf_col1:
+        #     buf_top = st.number_input("상", min_value=0, max_value=100, value=12, key="buf_top_input", help="상단 버퍼 (mm)")
+        # with buf_col2:
+        #     buf_bottom = st.number_input("하", min_value=0, max_value=100, value=12, key="buf_bottom_input", help="하단 버퍼 (mm)")
+        # with buf_col3:
+        #     buf_left = st.number_input("좌", min_value=0, max_value=100, value=12, key="buf_left_input", help="좌측 버퍼 (mm)")
+        # with buf_col4:
+        #     buf_right = st.number_input("우", min_value=0, max_value=100, value=12, key="buf_right_input", help="우측 버퍼 (mm)")
+        # with buf_col5:
+        #     if st.button("버퍼적용", width='stretch', help="선택 패턴에 상하좌우 버퍼 적용"):
+        #         sel_indices = [i for i in base_indices_set if st.session_state.get(f"chk_{i}")]
+        #         if sel_indices:
+        #             selected_sizes = st.session_state.get('selected_sizes', [])
+        #
+        #             # 선택한 패턴 + 모든 선택된 사이즈 확장하여 버퍼 적용
+        #             expanded_indices = set()
+        #             for idx in sel_indices:
+        #                 pattern_group = patterns[idx][4]
+        #                 fabric = st.session_state.df.loc[idx, '원단'] if idx < len(st.session_state.df) else ''
+        #                 group_key = (pattern_group, fabric)
+        #                 if pattern_group and group_key in group_to_indices:
+        #                     for size_name, size_idx in group_to_indices[group_key].items():
+        #                         if not selected_sizes or size_name in selected_sizes:
+        #                             expanded_indices.add(size_idx)
+        #                 else:
+        #                     expanded_indices.add(idx)
+        #
+        #             for idx in expanded_indices:
+        #                 st.session_state.df.at[idx, "버퍼_상"] = buf_top
+        #                 st.session_state.df.at[idx, "버퍼_하"] = buf_bottom
+        #                 st.session_state.df.at[idx, "버퍼_좌"] = buf_left
+        #                 st.session_state.df.at[idx, "버퍼_우"] = buf_right
+        #             st.rerun()
+
         st.divider()
 
         # ----------------------------------------------------------------
@@ -3256,11 +3528,40 @@ if uploaded_file is not None:
 
             # 데이터프레임 생성 (기본 사이즈만, 사이즈 열 숨김)
             display_df = st.session_state.df.iloc[base_indices].copy()
-            display_df["면적(cm²)"] = (display_df["면적_raw"] * 10000).round(1)
-            display_df = display_df.drop(columns=["면적_raw"])
+
+            # 버퍼 포함 면적 계산 (mm² -> m²)
+            def calc_buffered_area(row):
+                """버퍼 포함 면적 계산 (m² 단위)"""
+                base_area = row['면적_raw']  # 원본 면적 (m²)
+                w_mm = row['가로(cm)'] * 10  # 가로 (mm)
+                h_mm = row['세로(cm)'] * 10  # 세로 (mm)
+                buf_top = row.get('버퍼_상', 0) if '버퍼_상' in row else 0
+                buf_bottom = row.get('버퍼_하', 0) if '버퍼_하' in row else 0
+                buf_left = row.get('버퍼_좌', 0) if '버퍼_좌' in row else 0
+                buf_right = row.get('버퍼_우', 0) if '버퍼_우' in row else 0
+
+                # 버퍼 추가 면적 (mm²)
+                # 상하: 가로 * 버퍼높이
+                # 좌우: 세로 * 버퍼폭
+                # 모서리: 버퍼_상*버퍼_좌 + 버퍼_상*버퍼_우 + 버퍼_하*버퍼_좌 + 버퍼_하*버퍼_우
+                buffer_area_mm2 = (
+                    w_mm * (buf_top + buf_bottom) +
+                    h_mm * (buf_left + buf_right) +
+                    buf_top * buf_left + buf_top * buf_right +
+                    buf_bottom * buf_left + buf_bottom * buf_right
+                )
+                buffer_area_m2 = buffer_area_mm2 / 1_000_000
+                return base_area + buffer_area_m2
+
+            display_df["면적_버퍼포함"] = display_df.apply(calc_buffered_area, axis=1)
+            display_df["면적(cm²)"] = (display_df["면적_버퍼포함"] * 10000).round(1)
+            display_df = display_df.drop(columns=["면적_raw", "면적_버퍼포함"])
             # 사이즈 열 숨김 (사이즈선택 UI에서 이미 선택됨)
             if "사이즈" in display_df.columns:
                 display_df = display_df.drop(columns=["사이즈"])
+            # 버퍼 컬럼 숨김
+            buffer_cols = ["버퍼_상", "버퍼_하", "버퍼_좌", "버퍼_우"]
+            display_df = display_df.drop(columns=[c for c in buffer_cols if c in display_df.columns])
             display_df = display_df.reset_index(drop=True)
             display_df["번호"] = range(1, len(display_df) + 1)  # 번호 순차 재설정
 
@@ -3269,7 +3570,7 @@ if uploaded_file is not None:
                 hide_index=True,
                 width='stretch',
                 num_rows="fixed",
-                disabled=["면적(cm²)", "형상"],
+                disabled=["형상", "번호", "가로(cm)", "세로(cm)", "면적(cm²)"],
                 column_config={
                     "형상": st.column_config.ImageColumn(
                         "형상", help="패턴 미리보기", width="small"
@@ -3296,7 +3597,20 @@ if uploaded_file is not None:
                     old_cat = st.session_state.df.at[base_idx, "구분"]
                     new_cat = edited_df.at[i, "구분"]
 
-                    has_change = (old_fabric != new_fabric or old_qty != new_qty or old_cat != new_cat)
+                    # 버퍼 변경 확인
+                    old_buf_top = st.session_state.df.at[base_idx, "버퍼_상"] if "버퍼_상" in st.session_state.df.columns else 0
+                    new_buf_top = edited_df.at[i, "버퍼_상"] if "버퍼_상" in edited_df.columns else 0
+                    old_buf_bottom = st.session_state.df.at[base_idx, "버퍼_하"] if "버퍼_하" in st.session_state.df.columns else 0
+                    new_buf_bottom = edited_df.at[i, "버퍼_하"] if "버퍼_하" in edited_df.columns else 0
+                    old_buf_left = st.session_state.df.at[base_idx, "버퍼_좌"] if "버퍼_좌" in st.session_state.df.columns else 0
+                    new_buf_left = edited_df.at[i, "버퍼_좌"] if "버퍼_좌" in edited_df.columns else 0
+                    old_buf_right = st.session_state.df.at[base_idx, "버퍼_우"] if "버퍼_우" in st.session_state.df.columns else 0
+                    new_buf_right = edited_df.at[i, "버퍼_우"] if "버퍼_우" in edited_df.columns else 0
+
+                    buf_change = (old_buf_top != new_buf_top or old_buf_bottom != new_buf_bottom or
+                                  old_buf_left != new_buf_left or old_buf_right != new_buf_right)
+
+                    has_change = (old_fabric != new_fabric or old_qty != new_qty or old_cat != new_cat or buf_change)
 
                     if has_change:
                         any_change = True
@@ -3309,6 +3623,13 @@ if uploaded_file is not None:
                         st.session_state.df.at[base_idx, "구분"] = new_cat
                         if old_fabric != new_fabric:
                             st.session_state.df.at[base_idx, "형상"] = poly_to_base64(patterns[base_idx][0], get_fabric_color_hex(new_fabric))
+
+                        # 버퍼 업데이트
+                        if "버퍼_상" in st.session_state.df.columns:
+                            st.session_state.df.at[base_idx, "버퍼_상"] = new_buf_top
+                            st.session_state.df.at[base_idx, "버퍼_하"] = new_buf_bottom
+                            st.session_state.df.at[base_idx, "버퍼_좌"] = new_buf_left
+                            st.session_state.df.at[base_idx, "버퍼_우"] = new_buf_right
 
                         # 동일 패턴의 다른 사이즈에도 적용 (pattern_group + 원단으로 매칭)
                         base_pattern_group = patterns[base_idx][4] if base_idx < len(patterns) else None
@@ -3325,6 +3646,12 @@ if uploaded_file is not None:
                                     st.session_state.df.at[j, "구분"] = new_cat
                                     if old_fabric != new_fabric and j < len(patterns):
                                         st.session_state.df.at[j, "형상"] = poly_to_base64(patterns[j][0], get_fabric_color_hex(new_fabric))
+                                    # 버퍼도 동일하게 적용
+                                    if "버퍼_상" in st.session_state.df.columns:
+                                        st.session_state.df.at[j, "버퍼_상"] = new_buf_top
+                                        st.session_state.df.at[j, "버퍼_하"] = new_buf_bottom
+                                        st.session_state.df.at[j, "버퍼_좌"] = new_buf_left
+                                        st.session_state.df.at[j, "버퍼_우"] = new_buf_right
 
                         # 구분 변경 시 네스팅 결과의 패턴 이름도 업데이트
                         if old_cat != new_cat:
@@ -3349,6 +3676,30 @@ if uploaded_file is not None:
             # 데이터 재계산 (필터링된 데이터 사용)
             filtered_indices = st.session_state.get('filtered_indices', list(range(len(st.session_state.df))))
             calc_df = st.session_state.df.iloc[filtered_indices].copy()
+
+            # 버퍼 포함 면적 계산 함수
+            def calc_buffered_area_for_yield(row):
+                """요척 계산용 버퍼 포함 면적 (m² 단위)"""
+                base_area = row['면적_raw']  # 원본 면적 (m²)
+                w_mm = row['가로(cm)'] * 10  # 가로 (mm)
+                h_mm = row['세로(cm)'] * 10  # 세로 (mm)
+                buf_top = row.get('버퍼_상', 0) if '버퍼_상' in row else 0
+                buf_bottom = row.get('버퍼_하', 0) if '버퍼_하' in row else 0
+                buf_left = row.get('버퍼_좌', 0) if '버퍼_좌' in row else 0
+                buf_right = row.get('버퍼_우', 0) if '버퍼_우' in row else 0
+
+                # 버퍼 추가 면적 (mm²)
+                buffer_area_mm2 = (
+                    w_mm * (buf_top + buf_bottom) +
+                    h_mm * (buf_left + buf_right) +
+                    buf_top * buf_left + buf_top * buf_right +
+                    buf_bottom * buf_left + buf_bottom * buf_right
+                )
+                buffer_area_m2 = buffer_area_mm2 / 1_000_000
+                return base_area + buffer_area_m2
+
+            # 버퍼 포함 면적 컬럼 추가
+            calc_df['면적_버퍼포함'] = calc_df.apply(calc_buffered_area_for_yield, axis=1)
 
             # 선택된 사이즈 목록
             selected_sizes = st.session_state.get('selected_sizes', [])
@@ -3398,7 +3749,7 @@ if uploaded_file is not None:
                         for size in selected_sizes:
                             size_data = fabric_group[fabric_group['사이즈'] == size]
                             if not size_data.empty:
-                                size_area = sum(row['면적_raw'] * row['수량'] for _, row in size_data.iterrows())
+                                size_area = sum(row['면적_버퍼포함'] * row['수량'] for _, row in size_data.iterrows())
                                 if input_width > 0:
                                     width_m = input_width / 100 if unit == "cm" else (input_width * 2.54) / 100
                                     size_yd = ((size_area / width_m) / ((100-input_loss)/100)) * 1.09361
@@ -3413,7 +3764,7 @@ if uploaded_file is not None:
                         total_yield_all += fabric_total_yd
                     else:
                         # 사이즈 없는 경우: 전체 합산
-                        group_area = sum(row['면적_raw'] * row['수량'] for _, row in fabric_group.iterrows())
+                        group_area = sum(row['면적_버퍼포함'] * row['수량'] for _, row in fabric_group.iterrows())
                         if input_width > 0:
                             width_m = input_width / 100 if unit == "cm" else (input_width * 2.54) / 100
                             req_yd = ((group_area / width_m) / ((100-input_loss)/100)) * 1.09361
@@ -3433,7 +3784,7 @@ if uploaded_file is not None:
                     for size in selected_sizes:
                         size_data = fabric_group[fabric_group['사이즈'] == size]
                         if not size_data.empty:
-                            size_area = sum(row['면적_raw'] * row['수량'] for _, row in size_data.iterrows())
+                            size_area = sum(row['면적_버퍼포함'] * row['수량'] for _, row in size_data.iterrows())
 
                             if input_width > 0:
                                 width_m = input_width / 100 if unit == "cm" else (input_width * 2.54) / 100
@@ -3499,7 +3850,7 @@ if uploaded_file is not None:
                     for size in selected_sizes:
                         size_data = fabric_group[fabric_group['사이즈'] == size]
                         if not size_data.empty:
-                            size_area = sum(row['면적_raw'] * row['수량'] for _, row in size_data.iterrows())
+                            size_area = sum(row['면적_버퍼포함'] * row['수량'] for _, row in size_data.iterrows())
                             if input_width > 0:
                                 width_m = input_width / 100 if unit == "cm" else (input_width * 2.54) / 100
                                 size_yd = ((size_area / width_m) / ((100-input_loss)/100)) * 1.09361
@@ -3528,7 +3879,7 @@ if uploaded_file is not None:
                     total_yield += fabric_total
                 else:
                     # 사이즈 없는 경우
-                    group_area = sum(row['면적_raw'] * row['수량'] for _, row in fabric_group.iterrows())
+                    group_area = sum(row['면적_버퍼포함'] * row['수량'] for _, row in fabric_group.iterrows())
                     if input_width > 0:
                         width_m = input_width / 100 if unit == "cm" else (input_width * 2.54) / 100
                         req_yd = ((group_area / width_m) / ((100-input_loss)/100)) * 1.09361
@@ -3642,6 +3993,35 @@ if uploaded_file is not None:
             else:
                 sparrow_time = 30
 
+            # 패턴 순서 옵션
+            pattern_order = st.selectbox(
+                "📐 패턴 순서",
+                options=["default", "large_first", "small_first", "random"],
+                format_func=lambda x: {"default": "기본순서", "large_first": "큰것부터", "small_first": "작은것부터", "random": "랜덤"}[x],
+                index=0,
+                help="패턴 입력 순서 (배치 결과에 영향)",
+                key="pattern_order"
+            )
+
+            # 다중 시도 옵션
+            multi_try = st.checkbox(
+                "🎯 다중 시도 (최적 선택)",
+                value=False,
+                help="5가지 시드로 네스팅 후 최고 효율 선택",
+                key="multi_try"
+            )
+
+            # 랜덤 시드 (다중 시도 비활성시만 표시)
+            if not multi_try:
+                nest_seed = st.number_input(
+                    "🎲 랜덤 시드",
+                    min_value=1, max_value=9999, value=42,
+                    help="시드 변경 시 다른 배치 결과 생성",
+                    key="nest_seed"
+                )
+            else:
+                nest_seed = 42  # 다중 시도 시 내부에서 처리
+
             # 네스팅 실행 버튼
             run_nesting = st.button("🚀 네스팅 실행", width='stretch', type="primary")
             if 'nesting_elapsed' in st.session_state:
@@ -3650,7 +4030,7 @@ if uploaded_file is not None:
         with right_col:
 
             # 원단별 설정 헤더 (가운데 정렬)
-            hcol1, hcol2, hcol3, hcol4 = st.columns([2, 1, 1, 1])
+            hcol1, hcol2, hcol3, hcol4, hcol5 = st.columns([2, 1, 1, 0.7, 1])
             with hcol1:
                 st.markdown("<div style='text-align: center;'><b>원단</b></div>", unsafe_allow_html=True)
             with hcol2:
@@ -3658,7 +4038,12 @@ if uploaded_file is not None:
             with hcol3:
                 st.markdown("<div style='text-align: center;'><b>버퍼mm</b></div>", unsafe_allow_html=True)
             with hcol4:
+                st.markdown("<div style='text-align: center;'><b>🔄90°</b></div>", unsafe_allow_html=True)
+            with hcol5:
                 st.markdown("<div style='text-align: center;'><b>벌수</b></div>", unsafe_allow_html=True)
+
+            # 원단별 90도 회전 허용 딕셔너리
+            fabric_90_rotations = {}
 
             # 원단별 설정 입력
             for i, fabric in enumerate(fabric_list):
@@ -3672,7 +4057,7 @@ if uploaded_file is not None:
                     width_cm = width_val
                 fabric_widths[fabric] = width_cm
 
-                col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+                col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 0.7, 1])
                 with col1:
                     st.markdown(f"<div style='text-align: center;'>{fabric}: {width_cm:.1f}cm</div>", unsafe_allow_html=True)
                 with col2:
@@ -3692,6 +4077,17 @@ if uploaded_file is not None:
                         help=f"{fabric} 원단의 패턴 버퍼 (둘레 확장)"
                     )
                 with col4:
+                    # 원단별 90도 회전 허용 (가운데 정렬)
+                    _, chk_col, _ = st.columns([1, 2, 1])
+                    with chk_col:
+                        fabric_90_rotations[fabric] = st.checkbox(
+                            "🔄",
+                            value=False,
+                            key=f"fabric_90rot_{i}",
+                            label_visibility="collapsed",
+                            help=f"{fabric} 원단 90° 회전 허용 (체크 시 0°/90°/180°/270° 회전 가능)"
+                        )
+                with col5:
                     marker_quantities[fabric] = st.number_input(
                         "벌수",
                         min_value=1, max_value=10, value=1,
@@ -3779,13 +4175,23 @@ if uploaded_file is not None:
                                 # df인덱스는 정렬 후에도 유지되는 고유 식별자
                                 pattern_name = str(row['구분'])[-10:] if row['구분'] else ""  # 표시용 이름 (뒤에서 10글자)
                                 pattern_id = f"{idx}:{pattern_name}\n{size_name[:4]}" if size_name else f"{idx}:{pattern_name}"
+                                # 패턴별 상하좌우 버퍼 (mm)
+                                buf_top = row.get('버퍼_상', 0) if '버퍼_상' in row else 0
+                                buf_bottom = row.get('버퍼_하', 0) if '버퍼_하' in row else 0
+                                buf_left = row.get('버퍼_좌', 0) if '버퍼_좌' in row else 0
+                                buf_right = row.get('버퍼_우', 0) if '버퍼_우' in row else 0
+
                                 pattern_data.append({
                                     'coords_cm': coords_cm,
                                     'quantity': quantity,
                                     'pattern_id': pattern_id,
                                     'area_cm2': poly.area / 100,
                                     'df_idx': idx,  # 원본 df 인덱스 저장
-                                    'grainline_cm': grainline_cm  # 그레인라인 좌표 (cm)
+                                    'grainline_cm': grainline_cm,  # 그레인라인 좌표 (cm)
+                                    'buffer_top': buf_top,
+                                    'buffer_bottom': buf_bottom,
+                                    'buffer_left': buf_left,
+                                    'buffer_right': buf_right
                                 })
 
                         # 디버그: 상세 리스트 수량 합계 계산
@@ -3809,9 +4215,30 @@ if uploaded_file is not None:
 
                         if use_sparrow and SPARROW_AVAILABLE:
                             # Sparrow 네스팅 (버퍼로 패턴 둘레 확장)
-                            result = run_sparrow_nesting(
-                                pattern_data, width_cm, sparrow_time, nest_rotation, 0, nest_mirror, fabric_buffer
-                            )
+                            allow_90 = fabric_90_rotations.get(fabric, False)
+
+                            if multi_try:
+                                # 다중 시도: 5가지 시드로 실행 후 최고 효율 선택
+                                best_result = None
+                                best_efficiency = 0
+                                best_seed = 42
+                                test_seeds = [42, 123, 456, 789, 1024]
+                                for test_seed in test_seeds:
+                                    test_result = run_sparrow_nesting(
+                                        pattern_data, width_cm, sparrow_time // 2, nest_rotation, 0, nest_mirror, fabric_buffer, allow_90, test_seed, pattern_order
+                                    )
+                                    if test_result.get('efficiency', 0) > best_efficiency:
+                                        best_efficiency = test_result.get('efficiency', 0)
+                                        best_result = test_result
+                                        best_seed = test_seed
+                                result = best_result
+                                result['used_seed'] = best_seed
+                            else:
+                                # 단일 시도
+                                result = run_sparrow_nesting(
+                                    pattern_data, width_cm, sparrow_time, nest_rotation, 0, nest_mirror, fabric_buffer, allow_90, nest_seed, pattern_order
+                                )
+                                result['used_seed'] = nest_seed
                         else:
                             # 기본 네스팅 엔진 (버퍼 미지원, spacing으로 대체)
                             fabric_target_eff = target_efficiencies.get(fabric, 80)
@@ -3835,6 +4262,8 @@ if uploaded_file is not None:
                         result['size_quantities'] = size_quantities if has_multiple_sizes else {}
                         result['has_multiple_sizes'] = has_multiple_sizes
                         result['buffer'] = fabric_buffer  # 원단별 패턴 버퍼 저장
+                        result['allow_90'] = allow_90  # 원단별 90도 회전 허용 저장
+                        result['pattern_order'] = pattern_order  # 패턴 순서 저장
                         nesting_results[fabric] = result
 
                         # 디버그: 배치 실패 패턴 확인
@@ -4001,12 +4430,23 @@ if uploaded_file is not None:
 
                                                             base_id = str(row['구분'])[:12] if row['구분'] else f"P{idx+1}"
                                                             pattern_id = f"{base_id}\n{size_name[:4]}" if size_name else base_id
+
+                                                            # 패턴별 상하좌우 버퍼 (mm)
+                                                            buf_top = row.get('버퍼_상', 0) if '버퍼_상' in row else 0
+                                                            buf_bottom = row.get('버퍼_하', 0) if '버퍼_하' in row else 0
+                                                            buf_left = row.get('버퍼_좌', 0) if '버퍼_좌' in row else 0
+                                                            buf_right = row.get('버퍼_우', 0) if '버퍼_우' in row else 0
+
                                                             pattern_data.append({
                                                                 'coords_cm': coords_cm,
                                                                 'quantity': quantity,
                                                                 'pattern_id': pattern_id,
                                                                 'area_cm2': poly.area / 100,
-                                                                'grainline_cm': grainline_cm
+                                                                'grainline_cm': grainline_cm,
+                                                                'buffer_top': buf_top,
+                                                                'buffer_bottom': buf_bottom,
+                                                                'buffer_left': buf_left,
+                                                                'buffer_right': buf_right
                                                             })
 
                                                     width_cm = result['width_cm']
@@ -4014,6 +4454,10 @@ if uploaded_file is not None:
                                                     fabric_buffer = result.get('buffer', 0)
 
                                                     # Sparrow 네스팅 실행 (버퍼로 패턴 둘레 확장)
+                                                    # 원단별 90도 회전 설정 가져오기 (저장된 값 사용)
+                                                    allow_90 = result.get('allow_90', False)
+                                                    used_seed = result.get('used_seed', st.session_state.get('nest_seed', 42))
+                                                    used_order = st.session_state.get('pattern_order', 'default')
                                                     if SPARROW_AVAILABLE:
                                                         new_result = run_sparrow_nesting(
                                                             pattern_data, width_cm,
@@ -4021,7 +4465,10 @@ if uploaded_file is not None:
                                                             st.session_state.get('nest_rotation', True),
                                                             0,
                                                             st.session_state.get('nest_mirror', False),
-                                                            fabric_buffer
+                                                            fabric_buffer,
+                                                            allow_90,
+                                                            used_seed,
+                                                            used_order
                                                         )
                                                     else:
                                                         engine = NestingEngine(
@@ -4113,12 +4560,23 @@ if uploaded_file is not None:
 
                                         base_id = str(row['구분'])[:12] if row['구분'] else f"P{idx+1}"
                                         pattern_id = f"{base_id}\n{size_name[:4]}" if size_name else base_id
+
+                                        # 패턴별 상하좌우 버퍼 (mm)
+                                        buf_top = row.get('버퍼_상', 0) if '버퍼_상' in row else 0
+                                        buf_bottom = row.get('버퍼_하', 0) if '버퍼_하' in row else 0
+                                        buf_left = row.get('버퍼_좌', 0) if '버퍼_좌' in row else 0
+                                        buf_right = row.get('버퍼_우', 0) if '버퍼_우' in row else 0
+
                                         base_pattern_data.append({
                                             'coords_cm': coords_cm,
                                             'base_quantity': int(row['수량']),
                                             'pattern_id': pattern_id,
                                             'area_cm2': poly.area / 100,
-                                            'grainline_cm': grainline_cm
+                                            'grainline_cm': grainline_cm,
+                                            'buffer_top': buf_top,
+                                            'buffer_bottom': buf_bottom,
+                                            'buffer_left': buf_left,
+                                            'buffer_right': buf_right
                                         })
 
                                 # 원단별 패턴 버퍼 (저장된 값 또는 기본값 0)
@@ -4133,10 +4591,18 @@ if uploaded_file is not None:
                                             'quantity': p['base_quantity'] * try_qty,
                                             'pattern_id': p['pattern_id'],
                                             'area_cm2': p['area_cm2'],
-                                            'grainline_cm': p.get('grainline_cm')
+                                            'grainline_cm': p.get('grainline_cm'),
+                                            'buffer_top': p.get('buffer_top', 0),
+                                            'buffer_bottom': p.get('buffer_bottom', 0),
+                                            'buffer_left': p.get('buffer_left', 0),
+                                            'buffer_right': p.get('buffer_right', 0)
                                         })
 
                                     # 네스팅 실행 (버퍼로 패턴 둘레 확장)
+                                    # 원단별 90도 회전 설정 가져오기 (저장된 값 사용)
+                                    allow_90 = original_result.get('allow_90', False)
+                                    used_seed = original_result.get('used_seed', st.session_state.get('nest_seed', 42))
+                                    used_order = st.session_state.get('pattern_order', 'default')
                                     if SPARROW_AVAILABLE:
                                         test_result = run_sparrow_nesting(
                                             pattern_data, width_cm,
@@ -4144,7 +4610,10 @@ if uploaded_file is not None:
                                             st.session_state.get('nest_rotation', True),
                                             0,
                                             st.session_state.get('nest_mirror', False),
-                                            fabric_buffer
+                                            fabric_buffer,
+                                            allow_90,
+                                            used_seed,
+                                            used_order
                                         )
                                     else:
                                         engine = NestingEngine(
@@ -4239,5 +4708,5 @@ else:
     with col2:
         st.markdown("#### 📺 사용 가이드")
         # YouTube 썸네일 + 링크 버튼
-        st.image("https://img.youtube.com/vi/Dn_1IsG8J8Q/maxresdefault.jpg", width='stretch')
-        st.link_button("▶️ YouTube에서 영상 보기", "https://youtu.be/Dn_1IsG8J8Q", width='stretch')
+        st.image("https://img.youtube.com/vi/_-iXXdf-gMA/maxresdefault.jpg", width='stretch')
+        st.link_button("▶️ YouTube에서 영상 보기", "https://youtu.be/_-iXXdf-gMA", width='stretch')
