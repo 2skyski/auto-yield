@@ -803,29 +803,24 @@ def export_nesting_to_excel(nesting_results, timestamp, style_no=None, selected_
 
     current_row += 2  # 빈 줄 추가
 
-    # === 2. 원단별 마카 이미지 + 배치 상세 (2열 배치) ===
+    # === 2. 원단별 마카 이미지 (1열 배치, 90도 회전) ===
     ws.cell(row=current_row, column=1, value="■ 마카 이미지").font = section_font
     current_row += 1
 
     fabric_list = [f for f, r in nesting_results.items() if r.get('success')]
 
-    # 2개씩 묶어서 처리
-    for i in range(0, len(fabric_list), 2):
-        row_start = current_row
-        img_rows1 = 0
-        img_rows2 = 0
-
-        # 왼쪽 마카 (A열)
-        fabric1 = fabric_list[i]
-        result1 = nesting_results[fabric1]
-        ws.cell(row=current_row, column=1, value=f"▷ {fabric1}").font = Font(bold=True, size=11)
+    # 1개씩 배치 (90도 회전)
+    for fabric in fabric_list:
+        result = nesting_results[fabric]
+        ws.cell(row=current_row, column=1, value=f"▷ {fabric}").font = Font(bold=True, size=11)
+        current_row += 1
 
         try:
-            width_cm = result1.get('width_cm', 150)
-            if result1.get('sparrow_mode'):
-                fig = create_sparrow_visualization(result1, width_cm)
+            width_cm = result.get('width_cm', 150)
+            if result.get('sparrow_mode'):
+                fig = create_sparrow_visualization(result, width_cm)
             else:
-                fig = create_nesting_visualization(result1, width_cm)
+                fig = create_nesting_visualization(result, width_cm)
 
             if fig:
                 img_buffer = BytesIO()
@@ -834,57 +829,31 @@ def export_nesting_to_excel(nesting_results, timestamp, style_no=None, selected_
                 img_buffer.seek(0)
                 plt.close(fig)
 
-                img = XLImage(img_buffer)
+                # 이미지 90도 시계방향 회전 (PIL 사용)
+                from PIL import Image as PILImage
+                pil_img = PILImage.open(img_buffer)
+                rotated_img = pil_img.rotate(-90, expand=True)
+                rotated_buffer = BytesIO()
+                rotated_img.save(rotated_buffer, format='PNG')
+                rotated_buffer.seek(0)
+
+                img = XLImage(rotated_buffer)
                 orig_width = img.width
                 orig_height = img.height
-                if orig_width > 0:
-                    img.width = 450
-                    img.height = int(orig_height * (450 / orig_width))
+                # 세로로 배치되므로 높이 기준으로 크기 조정
+                if orig_height > 0:
+                    target_height = 600  # 세로 크기
+                    img.height = target_height
+                    img.width = int(orig_width * (target_height / orig_height))
 
-                ws.add_image(img, f'A{current_row + 1}')
-                img_rows1 = int(img.height / 15) + 2
+                ws.add_image(img, f'A{current_row}')
+                img_rows = int(img.height / 15) + 2
         except Exception as e:
-            ws.cell(row=current_row + 1, column=1, value=f"오류: {e}")
-            img_rows1 = 3
+            ws.cell(row=current_row, column=1, value=f"오류: {e}")
+            img_rows = 3
 
-        # 오른쪽 마카 (F열) - 있으면
-        fabric2 = None
-        result2 = None
-        if i + 1 < len(fabric_list):
-            fabric2 = fabric_list[i + 1]
-            result2 = nesting_results[fabric2]
-            ws.cell(row=current_row, column=6, value=f"▷ {fabric2}").font = Font(bold=True, size=11)
-
-            try:
-                width_cm = result2.get('width_cm', 150)
-                if result2.get('sparrow_mode'):
-                    fig = create_sparrow_visualization(result2, width_cm)
-                else:
-                    fig = create_nesting_visualization(result2, width_cm)
-
-                if fig:
-                    img_buffer = BytesIO()
-                    fig.savefig(img_buffer, format='png', dpi=150, bbox_inches='tight',
-                               facecolor='white', edgecolor='none')
-                    img_buffer.seek(0)
-                    plt.close(fig)
-
-                    img = XLImage(img_buffer)
-                    orig_width = img.width
-                    orig_height = img.height
-                    if orig_width > 0:
-                        img.width = 450
-                        img.height = int(orig_height * (450 / orig_width))
-
-                    ws.add_image(img, f'F{current_row + 1}')
-                    img_rows2 = int(img.height / 15) + 2
-            except Exception as e:
-                ws.cell(row=current_row + 1, column=6, value=f"오류: {e}")
-                img_rows2 = 3
-
-        # 마카 이미지 아래로 이동
-        max_img_rows = max(img_rows1, img_rows2, 10)
-        current_row += max_img_rows + 2
+        # 마카 이미지 아래로 이동 (간격 1칸)
+        current_row += max(img_rows, 10) + 1
 
     # 열 너비 조정
     ws.column_dimensions['A'].width = 15
