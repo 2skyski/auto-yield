@@ -3097,7 +3097,7 @@ if uploaded_file is not None:
                                     global_max_dim,
                                     base_size
                                 )
-                                st.plotly_chart(fig, use_container_width=True, config={
+                                st.plotly_chart(fig, use_container_width=True, key=f"overlay_{row_start}_{col_idx}", config={
                                     'scrollZoom': True,  # 마우스 휠 확대/축소
                                     'displayModeBar': True,
                                     'modeBarButtonsToRemove': ['select2d', 'lasso2d', 'autoScale2d'],
