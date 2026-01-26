@@ -3253,8 +3253,8 @@ if uploaded_file is not None:
                     # 가로/세로 업데이트 (회전 시)
                     if update_dimensions:
                         minx, miny, maxx, maxy = transformed_poly.bounds
-                        st.session_state.df.at[idx, "가로"] = round((maxx - minx) / 10, 1)
-                        st.session_state.df.at[idx, "세로"] = round((maxy - miny) / 10, 1)
+                        st.session_state.df.at[idx, "가로(cm)"] = round((maxx - minx) / 10, 1)
+                        st.session_state.df.at[idx, "세로(cm)"] = round((maxy - miny) / 10, 1)
 
                 # 썸네일 캐시 클리어
                 if 'thumbnail_cache' in st.session_state:
