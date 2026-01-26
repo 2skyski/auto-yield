@@ -2683,8 +2683,14 @@ if uploaded_file is not None:
         else:
             st.session_state.base_size = None
 
-        # 선택 사이즈 초기화 (기준사이즈만 선택)
-        if st.session_state.base_size and st.session_state.base_size in all_sizes:
+        # 선택 사이즈 초기화
+        # 1순위: 로딩 시 선택한 사이즈 (다이얼로그에서 선택한 것)
+        # 2순위: 기준사이즈만 선택
+        selected_load_sizes = st.session_state.get('selected_load_sizes')
+        if selected_load_sizes:
+            # 로딩 시 선택한 사이즈를 그대로 사용 (all_sizes에 있는 것만)
+            st.session_state.selected_sizes = [s for s in selected_load_sizes if s in all_sizes]
+        elif st.session_state.base_size and st.session_state.base_size in all_sizes:
             st.session_state.selected_sizes = [st.session_state.base_size]
         elif all_sizes:
             st.session_state.selected_sizes = [all_sizes[0]]
@@ -2720,7 +2726,7 @@ if uploaded_file is not None:
 
                     for size in all_sizes:
                         if size not in size_dict:
-                            # 누락된 사이즈 - 기준사이즈 패턴 복사 (8개 요소)
+                            # 누락된 사이즈 - 기준사이즈 패턴 복사 (9개 요소)
                             new_pattern = (
                                 base_pattern[0],  # poly (기준사이즈 형상 사용)
                                 base_pattern[1],  # pattern_name
@@ -2729,7 +2735,8 @@ if uploaded_file is not None:
                                 pattern_group,    # pattern_group
                                 base_pattern[5] if len(base_pattern) > 5 else "",  # piece_name
                                 base_pattern[6] if len(base_pattern) > 6 else 0,   # dxf_quantity
-                                base_pattern[7] if len(base_pattern) > 7 else None # grainline_info
+                                base_pattern[7] if len(base_pattern) > 7 else None, # grainline_info
+                                base_pattern[8] if len(base_pattern) > 8 else []   # interior_lines
                             )
                             added_patterns.append(new_pattern)
                             missing_info.append(f"{pattern_group}_{size}")
